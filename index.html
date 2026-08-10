@@ -99,9 +99,10 @@
         <button class="btn" data-mode="1">🐶 1인용</button>
         <button class="btn alt" data-mode="2">🐶🐰 2인 단체 <span class="tag">로컬</span></button>
         <button class="btn ghost" data-mode="3">🐶🐰🐱 3인 단체 <span class="tag">로컬</span></button>
-        <button class="btn" id="onlineBtn" style="background:linear-gradient(#b6f5c4,#4fd07a);box-shadow:0 6px 0 #2fa657,0 10px 18px rgba(47,166,87,.3);color:#0d4a24">🌐 온라인 (친구와) <span class="tag live">최대 4인</span></button>
+        <button class="btn" id="createBtn" style="background:linear-gradient(#b6f5c4,#4fd07a);box-shadow:0 6px 0 #2fa657,0 10px 18px rgba(47,166,87,.3);color:#0d4a24">🌐 방 만들기 <span class="tag live">최대 4인</span></button>
+        <button class="btn" id="joinBtn" style="background:linear-gradient(#c9f0ff,#7cc6f5);box-shadow:0 6px 0 #4a97c9,0 10px 18px rgba(74,151,201,.3);color:#0d3a52">🔑 친구방 들어가기</button>
       </div>
-      <p class="footer">온라인은 방코드로 친구를 초대해 같은 줄을 함께 넘어요.</p>
+      <p class="footer">방을 만들어 방코드를 공유하거나, 친구가 준 방코드로 들어가세요.</p>
     </div>
   </div>
 
@@ -118,28 +119,39 @@
     </div>
   </div>
 
-  <!-- ONLINE MENU -->
-  <div id="onlineScreen" class="screen hidden">
+  <!-- CREATE ROOM -->
+  <div id="createScreen" class="screen hidden">
     <div class="glass">
-      <h1>🌐 온라인 단체 줄넘기</h1>
-      <p class="sub">닉네임을 정하고, 방을 만들거나 방코드로 참가하세요.</p>
-      <input id="nick" class="field" placeholder="닉네임 (최대 6자)" maxlength="6" />
-      <div class="label" style="margin-top:12px;margin-bottom:6px">방 인원 선택 (방장)</div>
+      <h1>🌐 방 만들기</h1>
+      <p class="sub">닉네임과 인원을 정하고 방을 만들면 방코드가 나와요.</p>
+      <input id="nickCreate" class="field" placeholder="닉네임 (최대 6자)" maxlength="6" />
+      <div class="label" style="margin-top:12px;margin-bottom:6px">방 인원 선택</div>
       <div class="row" id="capRow" style="justify-content:center">
         <button class="capbtn" data-cap="2">2인</button>
         <button class="capbtn" data-cap="3">3인</button>
         <button class="capbtn selected" data-cap="4">4인</button>
       </div>
-      <div style="height:10px"></div>
-      <button class="btn" id="createRoomBtn">방 만들기 (방장)</button>
-      <div style="height:10px"></div>
-      <div class="row">
-        <input id="joinCode" class="field code" placeholder="방코드" maxlength="5" style="flex:1.2" />
-        <button class="btn alt small" id="joinRoomBtn" style="flex:1">참가</button>
-      </div>
-      <div id="onlineMsg" class="footer"></div>
+      <div style="height:12px"></div>
+      <button class="btn" id="createRoomBtn">방 만들기</button>
+      <div id="createMsg" class="footer"></div>
       <div style="height:8px"></div>
-      <button class="btn ghost" id="onlineBackBtn">← 뒤로</button>
+      <button class="btn ghost" id="createBackBtn">← 뒤로</button>
+    </div>
+  </div>
+
+  <!-- JOIN ROOM -->
+  <div id="joinScreen" class="screen hidden">
+    <div class="glass">
+      <h1>🔑 친구방 들어가기</h1>
+      <p class="sub">친구에게 받은 방코드를 입력하세요.</p>
+      <input id="nickJoin" class="field" placeholder="닉네임 (최대 6자)" maxlength="6" />
+      <div style="height:10px"></div>
+      <input id="joinCode" class="field code" placeholder="방코드 입력" maxlength="5" />
+      <div style="height:12px"></div>
+      <button class="btn alt" id="joinRoomBtn">참가하기</button>
+      <div id="joinMsg" class="footer"></div>
+      <div style="height:8px"></div>
+      <button class="btn ghost" id="joinBackBtn">← 뒤로</button>
     </div>
   </div>
 
@@ -626,7 +638,7 @@ function roundRect(x,y,w,h,r){
 
 /* ---------------- HUD & screens ---------------- */
 const el = (id)=>document.getElementById(id);
-function show(id){ ['titleScreen','readyScreen','onlineScreen','lobbyScreen','pauseScreen','overScreen'].forEach(s=>el(s).classList.add('hidden')); if(id) el(id).classList.remove('hidden'); }
+function show(id){ ['titleScreen','readyScreen','createScreen','joinScreen','lobbyScreen','pauseScreen','overScreen'].forEach(s=>el(s).classList.add('hidden')); if(id) el(id).classList.remove('hidden'); }
 function hud(on){ el('hud').classList.toggle('hidden', !on); el('netbadge').style.display = (on&&G.online)?'block':'none'; }
 function updateHUD(){
   el('score').textContent = G.score;
@@ -670,8 +682,11 @@ function startOfflineOrMenu(){
 }
 
 /* ---------------- Online flow ---------------- */
-el('onlineBtn').addEventListener('click', ()=>{ ac(); el('onlineMsg').textContent=''; show('onlineScreen'); if(typeof Peer==='undefined'){ el('onlineMsg').textContent='⚠ 네트워크 라이브러리를 불러오지 못했어요. 인터넷 연결을 확인하고 새로고침 해주세요.'; } });
-el('onlineBackBtn').addEventListener('click', ()=> show('titleScreen'));
+function peerReady(msgId){ if(typeof Peer==='undefined'){ el(msgId).textContent='⚠ 네트워크 라이브러리를 불러오지 못했어요. 인터넷 연결을 확인하고 새로고침 해주세요.'; return false; } return true; }
+el('createBtn').addEventListener('click', ()=>{ ac(); el('createMsg').textContent=''; show('createScreen'); peerReady('createMsg'); });
+el('joinBtn').addEventListener('click', ()=>{ ac(); el('joinMsg').textContent=''; show('joinScreen'); peerReady('joinMsg'); });
+el('createBackBtn').addEventListener('click', ()=> show('titleScreen'));
+el('joinBackBtn').addEventListener('click', ()=> show('titleScreen'));
 let roomCapChoice = 4;
 document.querySelectorAll('#capRow .capbtn').forEach(b=>{
   b.addEventListener('click', ()=>{
@@ -679,13 +694,13 @@ document.querySelectorAll('#capRow .capbtn').forEach(b=>{
     b.classList.add('selected'); roomCapChoice = parseInt(b.dataset.cap,10);
   });
 });
-el('createRoomBtn').addEventListener('click', ()=>{ ac(); Net.host(getNick(), roomCapChoice); });
-el('joinRoomBtn').addEventListener('click', ()=>{ ac(); const code=el('joinCode').value.trim().toUpperCase(); if(code.length<4){ el('onlineMsg').textContent='방코드를 입력해주세요.'; return; } Net.join(code, getNick()); });
-el('lobbyLeaveBtn').addEventListener('click', ()=>{ Net.leave(); show('onlineScreen'); });
+el('createRoomBtn').addEventListener('click', ()=>{ ac(); if(!peerReady('createMsg')) return; Net.host(getNick('nickCreate'), roomCapChoice); });
+el('joinRoomBtn').addEventListener('click', ()=>{ ac(); if(!peerReady('joinMsg')) return; const code=el('joinCode').value.trim().toUpperCase(); if(code.length<4){ el('joinMsg').textContent='방코드를 입력해주세요.'; return; } Net.join(code, getNick('nickJoin')); });
+el('lobbyLeaveBtn').addEventListener('click', ()=>{ const wasHost=Net.isHost; Net.leave(); show(wasHost?'createScreen':'joinScreen'); });
 el('lobbyReadyBtn').addEventListener('click', ()=>{ Net.toggleReady(); });
 el('lobbyStartBtn').addEventListener('click', ()=>{ Net.startGame(); });
 el('lobbyCode').addEventListener('click', ()=>{ const c=Net.code; if(c && navigator.clipboard){ navigator.clipboard.writeText(c).then(()=>showToastLobby('복사됨!')); } });
-function getNick(){ const v=el('nick').value.trim(); return v || null; }
+function getNick(id){ const e=el(id); const v=e?e.value.trim():''; return v || null; }
 function showToastLobby(t){ el('lobbyHint').textContent = t; }
 
 function startOnline(){ resize(); show(null); hud(true); last=0; updateHUD(); startCountdown(); }
@@ -735,15 +750,16 @@ const Net = {
   reset(){
     try{ if(this.peer) this.peer.destroy(); }catch(e){}
     this.peer=null; this.isHost=false; this.code=null; this.conns=[]; this.hostConn=null;
-    this.roster=[]; this.myPid=0; this.started=false; this.prevAlive=[]; this.roomCap=MAX_ONLINE; this.myReady=false;
+    this.roster=[]; this.myPid=0; this.started=false; this.prevAlive=[]; this.roomCap=MAX_ONLINE; this.myReady=false; this._msgId='joinMsg';
   },
+  _msg(t){ const e=el(this._msgId||'joinMsg'); if(e) e.textContent=t; },
 
   host(nick, cap){
-    if(typeof Peer==='undefined'){ el('onlineMsg').textContent='⚠ 네트워크 라이브러리 로드 실패.'; return; }
-    this.reset(); this.isHost=true; this.myName = nick || CHARS[0].name;
+    this.reset(); this._msgId='createMsg'; this.isHost=true; this.myName = nick || CHARS[0].name;
+    if(typeof Peer==='undefined'){ this._msg('⚠ 네트워크 라이브러리 로드 실패.'); return; }
     this.roomCap = Math.max(2, Math.min(MAX_ONLINE, cap || MAX_ONLINE));
     this.code = this._genCode();
-    el('onlineMsg').textContent='방 여는 중…';
+    this._msg('방 여는 중…');
     this._createPeer(this._codeToId(this.code));
     this.peer.on('open', ()=>{
       this.roster = [{pid:0, charIdx:0, name:this.myName, connId:'host'}];
@@ -753,34 +769,34 @@ const Net = {
     this.peer.on('connection', (conn)=> this._onGuestConn(conn));
     this.peer.on('error', (err)=>{
       if(err.type==='unavailable-id'){ this.code=this._genCode(); this._recreate(this._codeToId(this.code)); }
-      else { el('onlineMsg').textContent='연결 오류: '+err.type; }
+      else { this._msg('연결 오류: '+err.type); }
     });
   },
   _recreate(id){ try{ if(this.peer) this.peer.destroy(); }catch(e){}; this._createPeer(id);
     this.peer.on('open', ()=>{ this.roster=[{pid:0,charIdx:0,name:this.myName,connId:'host'}]; this._openLobby(true); this._renderRoster(); });
     this.peer.on('connection',(conn)=>this._onGuestConn(conn));
-    this.peer.on('error',(e)=>{ if(e.type==='unavailable-id'){ this.code=this._genCode(); this._recreate(this._codeToId(this.code)); } else el('onlineMsg').textContent='연결 오류: '+e.type; });
+    this.peer.on('error',(e)=>{ if(e.type==='unavailable-id'){ this.code=this._genCode(); this._recreate(this._codeToId(this.code)); } else this._msg('연결 오류: '+e.type); });
   },
   _createPeer(id){ this.peer = id ? new Peer(id, this._peerConfig()) : new Peer(this._peerConfig()); },
 
   join(code, nick){
-    if(typeof Peer==='undefined'){ el('onlineMsg').textContent='⚠ 네트워크 라이브러리 로드 실패.'; return; }
-    this.reset(); this.isHost=false; this.myName = nick || null; this.code = code;
-    el('onlineMsg').textContent='방 찾는 중…';
+    this.reset(); this._msgId='joinMsg'; this.isHost=false; this.myName = nick || null; this.code = code;
+    if(typeof Peer==='undefined'){ this._msg('⚠ 네트워크 라이브러리 로드 실패.'); return; }
+    this._msg('방 찾는 중…');
     this._createPeer(null);
     this.peer.on('open', ()=>{
       const conn = this.peer.connect(this._codeToId(code), {reliable:true});
       this.hostConn = conn;
       let opened=false;
-      const failTimer = setTimeout(()=>{ if(!opened){ el('onlineMsg').textContent='방을 찾을 수 없어요. 코드를 확인해주세요.'; try{conn.close();}catch(e){} } }, 8000);
+      const failTimer = setTimeout(()=>{ if(!opened){ this._msg('방을 찾을 수 없어요. 코드를 확인해주세요.'); try{conn.close();}catch(e){} } }, 8000);
       conn.on('open', ()=>{ opened=true; clearTimeout(failTimer); conn.send({t:'hello', name:this.myName}); });
       conn.on('data', (d)=> this._onHostData(d));
       conn.on('close', ()=> this._hostGone());
-      conn.on('error', ()=>{ el('onlineMsg').textContent='연결 실패. 코드를 확인해주세요.'; });
+      conn.on('error', ()=>{ this._msg('연결 실패. 코드를 확인해주세요.'); });
     });
     this.peer.on('error', (err)=>{
-      if(err.type==='peer-unavailable') el('onlineMsg').textContent='방을 찾을 수 없어요. 코드를 확인해주세요.';
-      else el('onlineMsg').textContent='연결 오류: '+err.type;
+      if(err.type==='peer-unavailable') this._msg('방을 찾을 수 없어요. 코드를 확인해주세요.');
+      else this._msg('연결 오류: '+err.type);
     });
   },
 
@@ -820,7 +836,7 @@ const Net = {
 
   _onHostData(d){
     if(d.t==='welcome'){ this.myPid = d.you; }
-    else if(d.t==='full'){ el('onlineMsg').textContent='방이 가득 찼어요 ('+(d.cap||MAX_ONLINE)+'인 방).'; show('onlineScreen'); this.reset(); }
+    else if(d.t==='full'){ show('joinScreen'); this.reset(); this._msgId='joinMsg'; this._msg('방이 가득 찼어요 ('+(d.cap||MAX_ONLINE)+'인 방).'); }
     else if(d.t==='roster'){ if(d.cap) this.roomCap = d.cap; this.roster = d.roster; this._openLobby(false); this._renderRoster(); }
     else if(d.t==='start'){ this._beginAsGuest(d.roster); }
     else if(d.t==='state'){ this._applyState(d); }
@@ -829,7 +845,7 @@ const Net = {
   },
   _hostGone(){
     if(this.started && !G.over){ showToast('방장 연결 끊김'); G.over=true; G.running=false; }
-    if(!this.started){ el('onlineMsg').textContent='방장과의 연결이 끊겼어요.'; show('onlineScreen'); }
+    if(!this.started){ show('joinScreen'); this._msgId='joinMsg'; this._msg('방장과의 연결이 끊겼어요.'); }
     this.started=false;
   },
 
