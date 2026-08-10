@@ -65,6 +65,12 @@
          color:#fff; text-shadow:0 2px 8px rgba(0,0,0,.35); opacity:0; pointer-events:none; transition:opacity .15s; text-align:center;}
   #netbadge{position:absolute; top:60px; left:50%; transform:translateX(-50%); z-index:4; font-size:12px; font-weight:700;
             color:#134b63; background:rgba(255,255,255,.8); padding:4px 10px; border-radius:999px; display:none;}
+  #countdown{position:absolute; inset:0; z-index:7; display:none; align-items:center; justify-content:center;
+             pointer-events:none; font-size:150px; font-weight:900; color:#fff;
+             text-shadow:0 6px 0 #ff5c8a, 0 10px 24px rgba(0,0,0,.3);}
+  #countdown.show{display:flex;}
+  #countdown span{display:inline-block; animation:cdpop .5s ease-out;}
+  @keyframes cdpop{0%{transform:scale(2.2); opacity:0;} 40%{transform:scale(1); opacity:1;} 100%{transform:scale(1); opacity:1;}}
 </style>
 </head>
 <body>
@@ -82,6 +88,7 @@
   <div id="netbadge"></div>
   <div id="players"></div>
   <div id="toast"></div>
+  <div id="countdown"></div>
 
   <!-- TITLE -->
   <div id="titleScreen" class="screen">
@@ -144,7 +151,9 @@
       <div id="lobbyHint" class="sub"></div>
       <div id="rosterList" class="tip" style="text-align:left"></div>
       <div style="height:10px"></div>
+      <button class="btn alt" id="lobbyReadyBtn">✅ 레디</button>
       <button class="btn" id="lobbyStartBtn">시작하기</button>
+      <div id="startHint" class="footer"></div>
       <div style="height:8px"></div>
       <button class="btn ghost" id="lobbyLeaveBtn">← 나가기</button>
     </div>
@@ -216,6 +225,8 @@ const SFX = {
   good(n){ beep(600 + Math.min(n,20)*18, 0.08,'triangle',0.10); },
   perfect(){ beep(880,0.10,'triangle',0.12); beep(1320,0.09,'sine',0.07); },
   fail(){ beep(200,0.25,'sawtooth',0.14); beep(120,0.3,'sawtooth',0.1); },
+  tick(){ beep(660,0.12,'triangle',0.10); },
+  go(){ beep(990,0.18,'triangle',0.13); beep(1480,0.16,'sine',0.08); },
   win(){ [660,880,1046,1318].forEach((f,i)=>setTimeout(()=>beep(f,0.15,'triangle',0.12), i*110)); }
 };
 
@@ -242,6 +253,7 @@ const CHARS = [
 const G = {
   mode:1, online:false, isHost:false, myPid:0,
   running:false, paused:false, over:false,
+  phase:'play', countdown:0, cdLast:null,
   t:0, ropeAngle:0, ropeSpeed:(2*Math.PI)/1.15,
   passes:0, spins:0, score:0, combo:0, bestCombo:0,
   players:[], particles:[], shake:0, strikeFlash:0,
@@ -278,6 +290,7 @@ function newOnlineGame(roster, myPid, isHost){
 }
 function resetRun(){
   G.running=true; G.paused=false; G.over=false; G.finalStats=null;
+  G.phase='play'; G.countdown=0; G.cdLast=null;
   G.t=0; G.ropeAngle=0; G.passes=0; G.spins=0;
   G.score=0; G.combo=0; G.bestCombo=0;
   G.particles=[]; G.shake=0; G.strikeFlash=0;
@@ -286,7 +299,7 @@ function resetRun(){
 
 /* ---------------- Input ---------------- */
 function addInput(pid){          // authoritative jump (host/offline)
-  if(!G.running || G.paused || G.over) return;
+  if(!G.running || G.paused || G.over || G.phase!=='play') return;
   const p = G.players[pid];
   if(!p || !p.alive) return;
   if(p.jumpT <= JUMP_DUR) return;
@@ -294,7 +307,7 @@ function addInput(pid){          // authoritative jump (host/offline)
   SFX.jump();
 }
 function myJump(){                // this device's own input
-  if(!G.running || G.paused || G.over) return;
+  if(!G.running || G.paused || G.over || G.phase!=='play') return;
   if(!G.online){ return; }        // offline handled per-key/column
   const p = G.players[G.myPid];
   if(!p || !p.alive || p.jumpT <= JUMP_DUR) return;
@@ -358,13 +371,39 @@ function loop(ts){
   let dt = (ts - last)/1000; last = ts;
   if(dt > 0.05) dt = 0.05;
   if(G.running && !G.paused && !G.over){
-    if(!G.online || G.isHost) update(dt);
-    else guestTick(dt);
+    if(G.phase==='countdown'){
+      tickCountdown(dt);
+    } else {
+      if(!G.online || G.isHost) update(dt);
+      else guestTick(dt);
+    }
   }
   if(G.online && G.isHost && G.running) Net.maybeSendState(ts);
   render();
 }
 requestAnimationFrame(loop);
+
+/* ---------------- Countdown (3·2·1) ---------------- */
+function startCountdown(){
+  G.phase = 'countdown'; G.countdown = 3.0; G.cdLast = null;
+  el('countdown').classList.add('show');
+  el('countdown').innerHTML = '';
+}
+function tickCountdown(dt){
+  G.t += dt;                    // keep clouds/blink alive
+  G.countdown -= dt;
+  const n = Math.ceil(G.countdown);
+  if(n !== G.cdLast){
+    G.cdLast = n;
+    if(n > 0){ el('countdown').innerHTML = '<span>'+n+'</span>'; SFX.tick(); }
+  }
+  if(G.countdown <= 0){
+    el('countdown').classList.remove('show');
+    el('countdown').innerHTML = '';
+    G.phase = 'play';
+    SFX.go(); showToast('시작!');
+  }
+}
 
 function decayFx(dt){
   if(G.shake>0) G.shake = Math.max(0, G.shake - dt*4);
@@ -624,7 +663,7 @@ el('pauseBtn').addEventListener('click', ()=>{ if(G.online) return; if(G.running
 el('resumeBtn').addEventListener('click', ()=>{ G.paused=false; show(null); last=0; });
 el('quitBtn').addEventListener('click', ()=>{ G.running=false; hud(false); el('players').innerHTML=''; show('titleScreen'); });
 
-function startOffline(){ resize(); newGame(G.mode); show(null); hud(true); last=0; showToast('시작!'); }
+function startOffline(){ resize(); newGame(G.mode); show(null); hud(true); last=0; startCountdown(); }
 function startOfflineOrMenu(){
   if(G.online){ show('titleScreen'); hud(false); return; }   // online retry -> back to menu (need new room)
   startOffline();
@@ -643,12 +682,13 @@ document.querySelectorAll('#capRow .capbtn').forEach(b=>{
 el('createRoomBtn').addEventListener('click', ()=>{ ac(); Net.host(getNick(), roomCapChoice); });
 el('joinRoomBtn').addEventListener('click', ()=>{ ac(); const code=el('joinCode').value.trim().toUpperCase(); if(code.length<4){ el('onlineMsg').textContent='방코드를 입력해주세요.'; return; } Net.join(code, getNick()); });
 el('lobbyLeaveBtn').addEventListener('click', ()=>{ Net.leave(); show('onlineScreen'); });
+el('lobbyReadyBtn').addEventListener('click', ()=>{ Net.toggleReady(); });
 el('lobbyStartBtn').addEventListener('click', ()=>{ Net.startGame(); });
 el('lobbyCode').addEventListener('click', ()=>{ const c=Net.code; if(c && navigator.clipboard){ navigator.clipboard.writeText(c).then(()=>showToastLobby('복사됨!')); } });
 function getNick(){ const v=el('nick').value.trim(); return v || null; }
 function showToastLobby(t){ el('lobbyHint').textContent = t; }
 
-function startOnline(){ resize(); show(null); hud(true); last=0; showToast('시작!'); updateHUD(); }
+function startOnline(){ resize(); show(null); hud(true); last=0; updateHUD(); startCountdown(); }
 
 function endGame(){
   G.over=true; G.running=false;
@@ -695,7 +735,7 @@ const Net = {
   reset(){
     try{ if(this.peer) this.peer.destroy(); }catch(e){}
     this.peer=null; this.isHost=false; this.code=null; this.conns=[]; this.hostConn=null;
-    this.roster=[]; this.myPid=0; this.started=false; this.prevAlive=[]; this.roomCap=MAX_ONLINE;
+    this.roster=[]; this.myPid=0; this.started=false; this.prevAlive=[]; this.roomCap=MAX_ONLINE; this.myReady=false;
   },
 
   host(nick, cap){
@@ -752,13 +792,14 @@ const Net = {
     conn.on('open', ()=>{ conn.send({t:'welcome', you:pid}); this._pushRoster(pid, CHARS[pid].name, conn.peer); this._broadcastRoster(); });
     conn.on('data', (d)=>{
       if(d.t==='hello'){ const name=(d.name&&d.name.trim())||CHARS[pid].name; entry.name=name; const r=this.roster.find(x=>x.pid===pid); if(r) r.name=name; this._broadcastRoster(); this._renderRoster(); }
+      else if(d.t==='ready'){ const r=this.roster.find(x=>x.pid===pid); if(r) r.ready=!!d.ready; this._broadcastRoster(); this._renderRoster(); }
       else if(d.t==='jump'){ addInput(pid); }
     });
     conn.on('close', ()=> this._guestGone(pid));
     conn.on('error', ()=> this._guestGone(pid));
   },
   _nextPid(){ const used=new Set(this.roster.map(r=>r.pid)); for(let i=0;i<MAX_ONLINE;i++){ if(!used.has(i)) return i; } return this.roster.length; },
-  _pushRoster(pid,name,connId){ if(!this.roster.find(r=>r.pid===pid)) this.roster.push({pid,charIdx:pid,name,connId}); this._renderRoster(); },
+  _pushRoster(pid,name,connId){ if(!this.roster.find(r=>r.pid===pid)) this.roster.push({pid,charIdx:pid,name,connId,ready:false}); this._renderRoster(); },
   _guestGone(pid){
     this.roster = this.roster.filter(r=>r.pid!==pid);
     this.conns = this.conns.filter(c=>c.pid!==pid);
@@ -766,7 +807,14 @@ const Net = {
     if(this.started && G.players[pid]){ G.players[pid].alive=false; }   // drop from live game
   },
 
-  _broadcastRoster(){ this.broadcast({t:'roster', cap:this.roomCap, roster:this.roster.map(r=>({pid:r.pid,charIdx:r.charIdx,name:r.name}))}); },
+  _broadcastRoster(){ this.broadcast({t:'roster', cap:this.roomCap, roster:this.roster.map(r=>({pid:r.pid,charIdx:r.charIdx,name:r.name,ready:!!r.ready}))}); },
+  toggleReady(){   // guest only
+    if(this.isHost) return;
+    this.myReady = !this.myReady;
+    const r = this.roster.find(x=>x.pid===this.myPid); if(r) r.ready = this.myReady;
+    this.sendToHost({t:'ready', ready:this.myReady});
+    this._renderRoster();
+  },
   broadcast(msg){ for(const c of this.conns){ try{ if(c.conn && c.conn.open) c.conn.send(msg); }catch(e){} } },
   sendToHost(msg){ try{ if(this.hostConn && this.hostConn.open) this.hostConn.send(msg); }catch(e){} },
 
@@ -787,8 +835,9 @@ const Net = {
 
   _openLobby(isHost){
     el('lobbyCode').textContent = this.code || '-----';
-    el('lobbyHint').textContent = isHost ? ('친구에게 이 코드를 알려주세요. ('+this.roomCap+'인 방)') : '방장이 시작하기를 기다리는 중…';
+    el('lobbyHint').textContent = isHost ? ('친구에게 이 코드를 알려주세요. ('+this.roomCap+'인 방)') : '방코드로 친구가 들어오면 레디를 눌러주세요.';
     el('lobbyStartBtn').style.display = isHost ? 'block' : 'none';
+    el('lobbyReadyBtn').style.display = isHost ? 'none' : 'block';
     show('lobbyScreen');
   },
   _renderRoster(){
@@ -796,13 +845,27 @@ const Net = {
     const rs = [...this.roster].sort((a,b)=>a.pid-b.pid);
     list.innerHTML = '<b>참가자 '+rs.length+'/'+(this.roomCap||MAX_ONLINE)+'</b><br>' +
       rs.map(r=>{ const c=CHARS[r.charIdx%CHARS.length]; const me=(!this.isHost&&r.pid===this.myPid)||(this.isHost&&r.pid===0);
+        const status = r.pid===0 ? '<span class="tag">방장</span>'
+                     : (r.ready ? '<span class="tag live">✅ 레디</span>' : '<span class="tag">⏳ 대기</span>');
         return '<span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:'+c.body+';vertical-align:middle;margin-right:6px"></span>'+
-               r.name+(r.pid===0?' <span class="tag">방장</span>':'')+(me?' <span class="tag live">나</span>':''); }).join('<br>');
-    if(this.isHost) el('lobbyStartBtn').disabled = (rs.length<1);
+               r.name+' '+status+(me?' <span class="tag live">나</span>':''); }).join('<br>');
+    const guests = rs.filter(r=>r.pid!==0);
+    const allReady = guests.length>0 && guests.every(r=>r.ready);
+    if(this.isHost){
+      el('lobbyStartBtn').disabled = !allReady;
+      el('startHint').textContent = guests.length===0 ? '친구가 들어오길 기다리는 중…'
+        : (allReady ? '모두 레디 완료! 시작할 수 있어요.' : '친구들이 레디하면 시작할 수 있어요.');
+    } else {
+      const rb = el('lobbyReadyBtn');
+      rb.textContent = this.myReady ? '✅ 레디 완료 (취소)' : '레디';
+      rb.classList.toggle('ghost', this.myReady);
+    }
   },
 
   startGame(){   // host only
     if(!this.isHost || this.started) return;
+    const guests = this.roster.filter(r=>r.pid!==0);
+    if(guests.length===0 || !guests.every(r=>r.ready)){ return; }   // require all guests ready
     this.started = true;
     const roster = [...this.roster].sort((a,b)=>a.pid-b.pid).map(r=>({pid:r.pid,charIdx:r.charIdx,name:r.name}));
     // reindex pids to be contiguous 0..n-1 in play order
