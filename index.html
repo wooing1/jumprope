@@ -250,8 +250,13 @@ const CLEAR = 0.28;
 const PERFECT_WIN = 0.12;
 const MAX_ONLINE = 4;
 
-function periodFor(passes){ return Math.max(0.62, 1.15 - passes*0.012); }
-function jitterFor(passes){ return Math.min(0.62, 0.04 + passes*0.017); }
+// 시간(회전 수)이 지날수록 난이도 상승: 초반은 완만, 후반으로 갈수록 가속(2차항)
+function periodFor(spins){        // 회전 주기(초) — 점점 빨라져 반응 시간이 줄어듦
+  return Math.max(0.55, 1.22 - 0.016*spins - 0.00035*spins*spins);
+}
+function jitterFor(spins){        // 회전 타이밍 랜덤폭(비율) — 점점 크게 흔들려 예측이 어려워짐
+  return Math.min(0.62, 0.03 + 0.011*spins + 0.00030*spins*spins);
+}
 
 /* ---------------- Characters ---------------- */
 const CHARS = [
@@ -443,7 +448,7 @@ function update(dt){   // authoritative (host / offline)
     G.ropeAngle -= 2*Math.PI; G.spins++;
     const base = periodFor(G.spins), jf = jitterFor(G.spins);
     const rnd = (Math.random()*2 - 1) * jf;
-    const period = Math.max(0.42, base * (1 + rnd));
+    const period = Math.max(0.45, base * (1 + rnd));
     G.ropeSpeed = (2*Math.PI)/period;
     for(const p of G.players) p.scored=false;
   }
