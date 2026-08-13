@@ -246,21 +246,24 @@ const SFX = {
 const GROUND_RATIO = 0.80;
 // 비대칭 점프: 빠르게 올라가고(상승) 천천히 내려옴(하강). 타이밍은 '올라가는 순간'에 맞추고 하강은 여유롭게.
 const JUMP_RISE = 0.20;                // 상승 시간(초) — 스냅하게 튀어오름(여기서 타이밍을 맞춤)
-const JUMP_FALL = 0.34;                // 하강 시간(초) — 더 길게 부드럽게 내려옴(하강 판정 스트레스 제거)
-const JUMP_AIR  = JUMP_RISE + JUMP_FALL; // 총 체공시간(초) = 0.54
+const JUMP_FALL = 0.28;                // 하강 시간(초) — 상승보다 길어 여유롭되, 착지가 빨라 빠른 줄에 재점프 가능
+const JUMP_AIR  = JUMP_RISE + JUMP_FALL; // 총 체공시간(초) = 0.48
 const JUMP_HEIGHT = 130;
 const CLEAR = 0.14;                    // 착지 판정 여백 — 낮춰서 "공중에 떠 있으면 안전"에 가깝게
 const PERFECT_WIN = 0.11;
+const JUMP_BUFFER = 0.13;              // 입력 버퍼(초) — 착지 직전에 누른 탭을 착지 순간 자동 반영(클릭 씹힘 방지)
 const MAX_ONLINE = 4;
 // 공정성 하한: 줄 주기는 총 체공시간보다 항상 길어야 착지→재점프가 가능(무조건 걸림 방지)
-const MIN_PERIOD = JUMP_AIR + 0.08;    // = 0.62초
+const MIN_PERIOD = JUMP_AIR + 0.08;    // = 0.56초
 
 // 시간(회전 수)이 지날수록 난이도 상승: 초반은 완만, 후반으로 갈수록 가속(2차항)
 function periodFor(spins){        // 회전 주기(초) — 점점 빨라져 반응 시간이 줄어듦(공정 하한까지만)
   return Math.max(MIN_PERIOD, 1.22 - 0.016*spins - 0.00035*spins*spins);
 }
 function jitterFor(spins){        // 회전 타이밍 랜덤폭(비율) — 점점 크게 흔들려 예측이 어려워짐
-  return Math.min(0.62, 0.03 + 0.011*spins + 0.00030*spins*spins);
+  let j = 0.03 + 0.011*spins + 0.00030*spins*spins;
+  if(spins > 15) j += (spins - 15) * 0.014;   // 일정 횟수(15회) 이후 랜덤폭을 더 가파르게 키움
+  return Math.min(0.85, j);                   // 상한 0.62 → 0.85로 상향
 }
 
 /* ---------------- Characters ---------------- */
@@ -292,7 +295,7 @@ function makePlayers(entries){
     char: CHARS[e.charIdx % CHARS.length],
     name: e.name || CHARS[e.charIdx % CHARS.length].name,
     x: slotW*(i+1),
-    jumpT: 999, jumping:false, alive:true, scored:false, squish:0, hop:0,
+    jumpT: 999, jumping:false, alive:true, scored:false, squish:0, hop:0, buffer:0,
   }));
 }
 
@@ -320,24 +323,26 @@ function resetRun(){
 }
 
 /* ---------------- Input ---------------- */
+function doJumpOrBuffer(p){       // 지금 뛸 수 있으면 뛰고, 공중이면 입력을 버퍼에 저장
+  if(!p || !p.alive) return;
+  if(p.jumpT > JUMP_AIR){         // 착지 상태 → 즉시 점프
+    p.jumpT = 0; p.jumping = true; p.squish = 1; p.buffer = 0; SFX.jump();
+  } else {                        // 아직 공중 → 착지 순간 반영되도록 버퍼링(클릭 씹힘 방지)
+    p.buffer = JUMP_BUFFER;
+  }
+}
 function addInput(pid){          // authoritative jump (host/offline)
   if(!G.running || G.paused || G.over || G.phase!=='play') return;
-  const p = G.players[pid];
-  if(!p || !p.alive) return;
-  if(p.jumpT <= JUMP_AIR) return;
-  p.jumpT = 0; p.jumping = true; p.squish = 1;
-  SFX.jump();
+  doJumpOrBuffer(G.players[pid]);
 }
 function myJump(){                // this device's own input
   if(!G.running || G.paused || G.over || G.phase!=='play') return;
   if(!G.online){ return; }        // offline handled per-key/column
   const p = G.players[G.myPid];
-  if(!p || !p.alive || p.jumpT <= JUMP_AIR) return;
-  if(G.isHost){ addInput(G.myPid); }
-  else {
-    p.jumpT = 0; p.jumping = true; p.squish = 1; SFX.jump();   // optimistic
-    Net.sendToHost({t:'jump'});
-  }
+  if(!p || !p.alive) return;
+  if(G.isHost){ addInput(G.myPid); return; }
+  Net.sendToHost({t:'jump'});      // 방장에게 입력 전달(방장이 권위적으로 버퍼 처리)
+  doJumpOrBuffer(p);               // 로컬 즉시 반영(옵티미스틱 + 버퍼)
 }
 
 window.addEventListener('keydown', (e)=>{
@@ -440,6 +445,13 @@ function stepPlayers(dt){
     if(p.jumpT <= JUMP_AIR) p.jumpT += dt;
     if(p.squish>0) p.squish = Math.max(0, p.squish - dt*4);
     if(p.hop>0) p.hop = Math.max(0, p.hop - dt*3);
+    // 입력 버퍼: 착지 순간 자동으로 점프 실행(클릭 씹힘 방지)
+    if(p.buffer > 0){
+      p.buffer -= dt;
+      if(p.alive && p.jumpT > JUMP_AIR){
+        p.jumpT = 0; p.jumping = true; p.squish = 1; p.buffer = 0; SFX.jump();
+      } else if(p.buffer <= 0){ p.buffer = 0; }
+    }
   }
 }
 
