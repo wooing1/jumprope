@@ -28,6 +28,9 @@ STATE="/var/lib/games-tunnel"
 UNIT="/etc/systemd/system/games-tunnel.service"
 JUMPROPE_URL="https://raw.githubusercontent.com/wooing1/jumprope/main/index.html"
 TUNNEL_TOKEN="${TUNNEL_TOKEN:-}"
+# 기본을 http2(TCP 7844)로 둔다. 기본값 quic은 UDP 7844를 쓰는데
+# 클라우드 방화벽이 UDP 송신을 막는 경우가 많아 주소만 발급되고 1033/530이 난다.
+TUNNEL_PROTOCOL="${TUNNEL_PROTOCOL:-http2}"
 
 say(){ printf '\n\033[1;36m▶ %s\033[0m\n' "$*"; }
 ok(){  printf '  \033[1;32m✔\033[0m %s\n' "$*"; }
@@ -222,7 +225,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStartPre=/bin/sh -c ': > ${CFLOG}'
-ExecStart=${CFBIN} tunnel --no-autoupdate --url http://127.0.0.1:${NGINX_PORT} --logfile ${CFLOG}
+ExecStart=${CFBIN} tunnel --no-autoupdate --protocol ${TUNNEL_PROTOCOL} --edge-ip-version 4 --url http://127.0.0.1:${NGINX_PORT} --logfile ${CFLOG}
 Restart=always
 RestartSec=5
 User=root
@@ -243,13 +246,8 @@ say "6/8  공개 주소 확인"
 PUBURL=""
 if [ "$MODE" = "quick" ]; then
   for i in $(seq 1 24); do    # 최대 ~72초 대기
-    PUBURL=$(grep -ohE 'https://[a-z0-9-]+\.trycloudflare\.com' "$CFLOG" 2>/dev/null | head -1 || true)
+    PUBURL=$(grep -ohE 'https://[a-z0-9-]+\.trycloudflare\.com' "$CFLOG" 2>/dev/null | tail -1 || true)
     [ -n "$PUBURL" ] && break
-    if journalctl -u games-tunnel --no-pager -n 200 2>/dev/null \
-        | grep -qE 'Host not in allowlist|failed to (dial|unmarshal)|context deadline'; then
-      warn "터널 연결에 문제가 있는 것 같습니다"
-      break
-    fi
     sleep 3
   done
   if [ -n "$PUBURL" ]; then
@@ -259,6 +257,43 @@ if [ "$MODE" = "quick" ]; then
     warn "주소를 아직 못 받았습니다. 잠시 후 'sudo tunnel-url' 로 다시 확인해주세요."
     echo "     로그: journalctl -u games-tunnel -n 40 --no-pager"
     echo "           tail -20 $CFLOG"
+  fi
+
+  # 주소만 나오고 엣지 연결이 안 되면 1033/530이 난다 → 실제 연결 수립을 확인
+  CONNECTED=""
+  for i in $(seq 1 20); do   # 최대 ~60초
+    if grep -qE 'Registered tunnel connection|Connection [a-f0-9-]+ registered' "$CFLOG" 2>/dev/null; then
+      CONNECTED=1; break
+    fi
+    sleep 3
+  done
+  if [ -n "$CONNECTED" ]; then
+    ok "터널이 Cloudflare 엣지에 연결됨 (protocol=${TUNNEL_PROTOCOL})"
+  else
+    warn "엣지 연결이 확인되지 않습니다 → 브라우저에서 1033/530이 날 수 있습니다"
+    # 다른 프로토콜로 자동 재시도 (http2 ↔ quic)
+    ALT="quic"; [ "$TUNNEL_PROTOCOL" = "quic" ] && ALT="http2"
+    warn "protocol=${ALT} 로 자동 재시도합니다"
+    sed -i "s/--protocol ${TUNNEL_PROTOCOL}/--protocol ${ALT}/" "$UNIT"
+    systemctl daemon-reload; systemctl restart games-tunnel
+    TUNNEL_PROTOCOL="$ALT"
+    PUBURL=""
+    for i in $(seq 1 20); do
+      PUBURL=$(grep -ohE 'https://[a-z0-9-]+\.trycloudflare\.com' "$CFLOG" 2>/dev/null | tail -1 || true)
+      if [ -n "$PUBURL" ] && grep -qE 'Registered tunnel connection|Connection [a-f0-9-]+ registered' "$CFLOG" 2>/dev/null; then
+        CONNECTED=1; break
+      fi
+      sleep 3
+    done
+    if [ -n "$CONNECTED" ]; then
+      echo "$PUBURL" > "$STATE/url"
+      ok "재시도 성공 (protocol=${ALT}) — 새 주소: $PUBURL"
+    else
+      warn "두 프로토콜 모두 실패 — 아웃바운드 7844(TCP/UDP)가 막혀 있을 가능성이 큽니다"
+      echo "     확인:  timeout 8 bash -c 'cat </dev/null >/dev/tcp/region1.v2.argotunnel.com/7844' && echo OK || echo BLOCKED"
+      echo "     해결:  ACG 아웃바운드에 TCP 7844 허용, 또는 ACG 인바운드 80을 열고"
+      echo "            curl -fsSL https://raw.githubusercontent.com/wooing1/jumprope/main/deploy-games.sh | bash"
+    fi
   fi
 else
   ok "Cloudflare 대시보드에 설정한 도메인으로 접속됩니다"
@@ -276,7 +311,7 @@ if [ "\$MODE" = "named" ]; then
   systemctl is-active --quiet cloudflared 2>/dev/null && echo "상태: 실행 중" || echo "상태: 중지됨 (systemctl status cloudflared)"
   exit 0
 fi
-U=\$(grep -ohE 'https://[a-z0-9-]+\.trycloudflare\.com' "\$CFLOG" 2>/dev/null | head -1)
+U=\$(grep -ohE 'https://[a-z0-9-]+\.trycloudflare\.com' "\$CFLOG" 2>/dev/null | tail -1)
 [ -z "\$U" ] && U=\$(cat "\$STATE/url" 2>/dev/null || true)
 if [ -n "\$U" ]; then
   echo "\$U" > "\$STATE/url"
