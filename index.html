@@ -302,6 +302,11 @@ const BLAME_LINES_MULTI = [            // 여러 명일 때 (친구들이 놀리
 const BLAME_LINES_SOLO = [             // 1인용 (자책 톤)
   '아이고…','한 발만 더!','아까웠다…','다시 가자!','발이 안 떨어졌네'
 ];
+// 온라인 지연 보상: 게스트의 '걸림' 판정을 그 사람의 왕복지연(RTT)만큼 잠깐 유예해서
+// 지연 도착한 점프를 억울하게 죽이지 않는다. (성공/공중 판정은 즉시, 걸림만 유예)
+const NET_GRACE_MIN = 0.15;
+const NET_GRACE_MAX = 0.45;            // MIN_PERIOD(0.56)보다 작게 → 다음 스트라이크 전에 반드시 마무리
+const NET_GRACE_DEFAULT_RTT = 0.14;    // RTT 측정 전 기본값
 // 공정성 하한: 줄 주기는 총 체공시간보다 항상 길어야 착지→재점프가 가능(무조건 걸림 방지)
 const MIN_PERIOD = JUMP_AIR + 0.08;    // = 0.56초
 
@@ -333,6 +338,7 @@ const G = {
   players:[], particles:[], shake:0, strikeFlash:0,
   lives:START_LIVES, trips:0,
   blame:null,                    // {idx, t, lines:[{txt,at,dx,dy,rot}]}
+  pendingPass:null,              // 온라인 지연 판정 대기(게스트 걸림 유예)
   finalStats:null,
 };
 let BEST = { 1:0, 2:0, 3:0, online:0 };
@@ -371,7 +377,7 @@ function resetRun(){
   G.t=0; G.ropeAngle=0; G.passes=0; G.spins=0;
   G.score=0; G.combo=0; G.bestCombo=0;
   G.particles=[]; G.shake=0; G.strikeFlash=0;
-  G.lives=START_LIVES; G.trips=0; G.blame=null;
+  G.lives=START_LIVES; G.trips=0; G.blame=null; G.pendingPass=null;
   G.ropeSpeed=(2*Math.PI)/periodFor(0);
 }
 
@@ -470,7 +476,7 @@ function loop(ts){
       else guestTick(dt);
     }
   }
-  if(G.online && G.isHost && G.running) Net.maybeSendState(ts);
+  if(G.online && G.isHost && G.running){ Net.maybeSendState(ts); Net.maybePing(ts); }
   render();
 }
 requestAnimationFrame(loop);
@@ -508,6 +514,7 @@ function decayFx(dt){
 
 /* ---------------- 맹비난 연출 (마지막에 걸린 캐릭터 확대) ---------------- */
 function startBlame(idx){
+  G.pendingPass = null;        // 유예 판정 정리
   if(idx == null || idx < 0 || !G.players[idx]) { endGame(); return; }
   const multi = G.players.length > 1;
   const pool = multi ? BLAME_LINES_MULTI : BLAME_LINES_SOLO;
@@ -602,6 +609,8 @@ function update(dt){   // authoritative (host / offline)
   const prev = G.ropeAngle;
   G.ropeAngle += G.ropeSpeed * dt;
   stepPlayers(dt);
+  tickPendingPass(dt);       // 온라인 걸림 유예 판정 갱신(늦게 도착한 점프 구제)
+  if(G.over) return;         // 유예 판정으로 라운드가 끝났으면 여기서 멈춤
   if(prev < Math.PI && G.ropeAngle >= Math.PI) resolveStrike();
   if(G.ropeAngle >= 2*Math.PI){
     G.ropeAngle -= 2*Math.PI; G.spins++;
@@ -629,46 +638,87 @@ function jumpProgress(p){   // 발 높이 0~1 (0=착지, 1=정점). 상승은 �
   return Math.cos(d * (Math.PI/2));                                  // 정점에서 잠깐 떠 있다가 부드럽게 하강
 }
 
-function resolveStrike(){
-  let anyFail=false, anyGood=false, anyPerfect=false;
-  const groundY = H*GROUND_RATIO;
-  // 콤보는 '줄 통과 1회'당 1만 올린다(인원수만큼 뻥튀기던 문제 수정)
-  const comboIfGood = G.combo + 1;
-  const mult = 1 + Math.floor(comboIfGood/10);
-  let lostThisPass = 0;
-  let culpritIdx = -1;                 // 마지막 생명을 날린 캐릭터
-  for(const p of G.players){
-    if(!p.alive) continue;          // 접속이 끊긴 참가자는 판정 제외
-    if(p.stumble > 0) continue;     // 걸린 직후 회복 중 — 점수도, 생명 차감도 없음
+function isRemotePlayer(i){       // 방장 입장에서 '지연이 있는 원격 게스트'인지
+  return G.online && G.isHost && i !== G.myPid;
+}
+function graceFor(i){            // 그 게스트의 걸림 유예 시간(측정된 RTT 기반)
+  const rtt = (Net.latency && Net.latency[i] != null) ? Net.latency[i] : NET_GRACE_DEFAULT_RTT;
+  return Math.max(NET_GRACE_MIN, Math.min(NET_GRACE_MAX, rtt + 0.08));
+}
+function classifyStrike(){       // 이번 줄 통과에서 각 플레이어를 성공/걸림/유예로 분류
+  const res = { good:[], caught:[], pending:[] };
+  for(let i=0;i<G.players.length;i++){
+    const p = G.players[i];
+    if(!p.alive) continue;        // 접속 끊긴 참가자 제외
+    if(p.stumble > 0) continue;   // 회복 중 — 판정 제외(무적)
     if(jumpProgress(p) >= CLEAR){
-      anyGood = true;
-      const perfect = Math.abs(p.jumpT - JUMP_RISE) <= PERFECT_WIN;   // 정점(상승 완료) 근처면 PERFECT
-      G.score += (perfect?2:1) * mult;
-      p.hop = 1; spawnParticles(p.x, groundY-6, perfect);
-      if(perfect) anyPerfect = true;
+      res.good.push({ idx:i, perfect: Math.abs(p.jumpT - JUMP_RISE) <= PERFECT_WIN });
+    } else if(isRemotePlayer(i)){
+      res.pending.push({ idx:i, timeLeft: graceFor(i), forgiven:false, gone:false });   // 걸림 판정 유예
     } else {
-      // 걸림 → 라운드 공유 생명 1칸 차감. 캐릭터는 죽지 않고 잠깐 회복 후 계속 플레이.
-      p.stumble = STUMBLE_TIME; p.buffer = 0; p.trips++;
-      G.trips++; lostThisPass++;
-      if(culpritIdx < 0) culpritIdx = G.players.indexOf(p);
-      anyFail = true; G.shake=1; G.strikeFlash=1;
-      spawnParticles(p.x, groundY-6, false, true);
+      res.caught.push({ idx:i });   // 방장 자신/오프라인 — 즉시 확정(지연 없음)
     }
   }
-  if(lostThisPass > 0) G.lives = Math.max(0, G.lives - lostThisPass);
+  return res;
+}
+function resolveStrike(){
+  // 직전 패스의 유예 판정이 남아 있으면 먼저 마무리(중첩 방지)
+  if(G.pendingPass){ const r=G.pendingPass; G.pendingPass=null; finalizePass(r); if(G.over) return; }
   G.passes++;
+  const res = classifyStrike();
+  if(res.pending.length === 0) finalizePass(res);   // 유예할 원격 걸림 없음 → 즉시 확정
+  else G.pendingPass = res;                          // 원격 걸림은 잠깐 대기(지연 도착 점프 구제)
+}
+function tickPendingPass(dt){    // 매 프레임 유예 판정을 갱신
+  const pp = G.pendingPass; if(!pp) return;
+  let allResolved = true;
+  for(const x of pp.pending){
+    if(x.forgiven || x.gone) continue;
+    const p = G.players[x.idx];
+    if(!p || !p.alive){ x.gone = true; continue; }        // 유예 중 접속 끊김 → 걸림으로 세지 않음
+    if(jumpProgress(p) >= CLEAR){ x.forgiven = true; pp.good.push({ idx:x.idx, perfect:false }); continue; }
+    x.timeLeft -= dt;
+    if(x.timeLeft > 0) allResolved = false;               // 아직 유예 시간 남음
+  }
+  if(allResolved){ G.pendingPass = null; finalizePass(pp); }
+}
+function finalizePass(res){      // 성공/걸림을 실제 반영(점수·콤보·생명)
+  const groundY = H*GROUND_RATIO;
+  const caughtIdx = [];
+  for(const c of res.caught){ const p=G.players[c.idx]; if(p && p.alive) caughtIdx.push(c.idx); }
+  for(const x of res.pending){ if(!x.forgiven && !x.gone){ const p=G.players[x.idx]; if(p && p.alive) caughtIdx.push(x.idx); } }
+
+  const anyGood = res.good.length > 0;
+  const anyFail = caughtIdx.length > 0;
+  const comboIfGood = G.combo + 1;                     // 콤보는 줄 통과 1회당 1만 (인원수 무관)
+  const mult = 1 + Math.floor(comboIfGood/10);
+  let anyPerfect = false;
+
+  for(const g of res.good){
+    const p = G.players[g.idx]; if(!p) continue;
+    G.score += (g.perfect?2:1) * mult;
+    if(g.perfect) anyPerfect = true;
+    p.hop = 1; spawnParticles(p.x, groundY-6, g.perfect);
+  }
+  let culpritIdx = -1;
+  for(const idx of caughtIdx){
+    const p = G.players[idx];
+    p.stumble = STUMBLE_TIME; p.buffer = 0; p.trips++;   // 죽지 않고 잠깐 휘청였다 계속
+    G.trips++;
+    if(culpritIdx < 0) culpritIdx = idx;
+    spawnParticles(p.x, groundY-6, false, true);
+  }
+  if(anyFail){ G.shake=1; G.strikeFlash=1; G.lives = Math.max(0, G.lives - caughtIdx.length); }
+
   if(anyPerfect){ SFX.perfect(); showToast('PERFECT!'); }
   if(anyFail){
     SFX.fail(); G.combo = 0;
+    if(G.online && G.isHost) Net.broadcast({t:'fx', good:anyGood, fail:true, perfect:anyPerfect});
     if(G.lives <= 0){ updateHUD(); startBlame(culpritIdx); return; }
-    showToast(G.lives === 1 ? '마지막 기회!' : '생명 -'+lostThisPass+'  (남은 '+G.lives+')');
+    showToast(G.lives === 1 ? '마지막 기회!' : '생명 -'+caughtIdx.length+'  (남은 '+G.lives+')');
   } else {
-    if(anyGood){ G.combo = comboIfGood; G.bestCombo = Math.max(G.bestCombo, G.combo); }
-    if(anyGood && !anyPerfect) SFX.good(G.combo);
-  }
-
-  if(G.online && G.isHost){
-    Net.broadcast({t:'fx', good:anyGood, fail:anyFail, perfect:anyPerfect});
+    if(anyGood){ G.combo = comboIfGood; G.bestCombo = Math.max(G.bestCombo, G.combo); if(!anyPerfect) SFX.good(G.combo); }
+    if(G.online && G.isHost) Net.broadcast({t:'fx', good:anyGood, fail:false, perfect:anyPerfect});
   }
   updateHUD();
 }
@@ -1038,7 +1088,7 @@ function startOnline(){ resize(); show(null); hud(true); last=0; updateHUD(); st
 
 function endGame(){
   G.over=true; G.running=false;
-  G.blame=null; G.phase='play';        // 연출 정리(결과 화면은 확대 없이 깔끔하게)
+  G.blame=null; G.pendingPass=null; G.phase='play';        // 연출·유예 판정 정리
   const stats = { score:G.score, bestCombo:G.bestCombo, spins:G.spins, passes:G.passes,
                   trips:G.trips, perChar:G.players.map(p=>({name:p.name, trips:p.trips})) };
   G.finalStats = stats;
@@ -1078,6 +1128,7 @@ const Net = {
   myPid:0, myName:null,
   lastSend:0, started:false,
   prevAlive:[], roomCap:MAX_ONLINE,
+  latency:{}, lastPing:0,        // 방장: 플레이 인덱스별 왕복지연(초) — 걸림 유예에 사용
 
   _peerConfig(){ return { config:{ iceServers:[
     {urls:'stun:stun.l.google.com:19302'}, {urls:'stun:global.stun.twilio.com:3478'}
@@ -1089,6 +1140,7 @@ const Net = {
     try{ if(this.peer) this.peer.destroy(); }catch(e){}
     this.peer=null; this.isHost=false; this.code=null; this.conns=[]; this.hostConn=null;
     this.roster=[]; this.myPid=0; this.started=false; this.prevAlive=[]; this.roomCap=MAX_ONLINE; this.myReady=false; this._msgId='joinMsg';
+    this.latency={}; this.lastPing=0;
   },
   _msg(t){ const e=el(this._msgId||'joinMsg'); if(e) e.textContent=t; },
 
@@ -1150,6 +1202,7 @@ const Net = {
       if(d.t==='hello'){ const name=(d.name&&d.name.trim())||CHARS[pid].name; entry.name=name; const r=this.roster.find(x=>x.pid===pid); if(r) r.name=name; this._broadcastRoster(); this._renderRoster(); }
       else if(d.t==='ready'){ const r=this.roster.find(x=>x.pid===pid); if(r) r.ready=!!d.ready; this._broadcastRoster(); this._renderRoster(); }
       else if(d.t==='jump'){ addInput(this._playIndex(pid)); }   // 로비 pid → 실제 플레이 인덱스로 변환
+      else if(d.t==='pong'){ const rtt=(performance.now()-d.ts)/1000; if(rtt>=0 && rtt<3) this.latency[this._playIndex(pid)] = rtt; }
     });
     conn.on('close', ()=> this._guestGone(pid));
     conn.on('error', ()=> this._guestGone(pid));
@@ -1197,6 +1250,7 @@ const Net = {
     else if(d.t==='state'){ this._applyState(d); }
     else if(d.t==='fx'){ this._playFx(d); }
     else if(d.t==='blame'){ applyRemoteBlame(d.i, d.lines); }
+    else if(d.t==='ping'){ this.sendToHost({t:'pong', ts:d.ts}); }   // 지연 측정 에코
     else if(d.t==='over'){ if(!G.over){ G.over=true; G.running=false; this.started=false; showOverScreen(d.stats); } }
   },
   _hostGone(){
@@ -1263,6 +1317,11 @@ const Net = {
     this.started = true; startOnline();
   },
 
+  maybePing(ts){   // 방장이 게스트들에게 주기적으로 핑을 보내 RTT 측정
+    if(ts - this.lastPing < 2000) return;
+    this.lastPing = ts;
+    for(const c of this.conns){ try{ if(c.conn && c.conn.open) c.conn.send({t:'ping', ts}); }catch(e){} }
+  },
   maybeSendState(ts){
     if(ts - this.lastSend < 33) return;   // ~30Hz
     this.lastSend = ts;
