@@ -786,7 +786,28 @@ el('joinRoomBtn').addEventListener('click', ()=>{ ac(); if(!peerReady('joinMsg')
 el('lobbyLeaveBtn').addEventListener('click', ()=>{ const wasHost=Net.isHost; Net.leave(); show(wasHost?'createScreen':'joinScreen'); });
 el('lobbyReadyBtn').addEventListener('click', ()=>{ Net.toggleReady(); });
 el('lobbyStartBtn').addEventListener('click', ()=>{ Net.startGame(); });
-el('lobbyCode').addEventListener('click', ()=>{ const c=Net.code; if(c && navigator.clipboard){ navigator.clipboard.writeText(c).then(()=>showToastLobby('복사됨!')).catch(()=>{}); } });
+function copyText(t){
+  // http:// 로 서비스하면 navigator.clipboard가 없으므로(보안 컨텍스트 아님) 폴백 사용
+  if(navigator.clipboard && window.isSecureContext){
+    return navigator.clipboard.writeText(t).then(()=>true).catch(()=>legacyCopy(t));
+  }
+  return Promise.resolve(legacyCopy(t));
+}
+function legacyCopy(t){
+  try{
+    const ta=document.createElement('textarea');
+    ta.value=t; ta.setAttribute('readonly','');
+    ta.style.cssText='position:fixed;top:0;left:0;opacity:0;';
+    document.body.appendChild(ta); ta.select(); ta.setSelectionRange(0,t.length);
+    const ok=document.execCommand('copy');
+    document.body.removeChild(ta);
+    return ok;
+  }catch(e){ return false; }
+}
+el('lobbyCode').addEventListener('click', ()=>{
+  const c=Net.code; if(!c) return;
+  copyText(c).then(ok=> showToastLobby(ok ? '복사됨!' : '코드: '+c));
+});
 el('lobbyCode').addEventListener('keydown', (e)=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); el('lobbyCode').click(); } });
 function getNick(id){ const e=el(id); const v=e?e.value.trim():''; return v || null; }
 function showToastLobby(t){ el('lobbyHint').textContent = t; }
