@@ -273,7 +273,9 @@ const SFX = {
   fail(){ beep(200,0.25,'sawtooth',0.14); beep(120,0.3,'sawtooth',0.1); },
   tick(){ beep(660,0.12,'triangle',0.10); },
   go(){ beep(990,0.18,'triangle',0.13); beep(1480,0.16,'sine',0.08); },
-  win(){ [660,880,1046,1318].forEach((f,i)=>setTimeout(()=>beep(f,0.15,'triangle',0.12), i*110)); }
+  win(){ [660,880,1046,1318].forEach((f,i)=>setTimeout(()=>beep(f,0.15,'triangle',0.12), i*110)); },
+  boo(){ [300,250,200,160].forEach((f,i)=>setTimeout(()=>beep(f,0.22,'sawtooth',0.11), i*120)); },
+  taunt(){ beep(420+Math.random()*260, 0.09,'square',0.09); }
 };
 
 /* ---------------- Constants ---------------- */
@@ -291,6 +293,15 @@ const MAX_ONLINE = 4;
 // (같은 캐릭터가 3번이든, 서로 다른 캐릭터가 각각 걸리든 모두 합산)
 const START_LIVES = 3;
 const STUMBLE_TIME = 1.1;              // 걸린 뒤 회복 시간(초) — 이 동안은 판정 제외(연속 차감 방지)
+// 마지막 생명을 날린 캐릭터를 확대해서 몰아세우는 연출
+const BLAME_TIME = 3.0;                // 연출 길이(초)
+const BLAME_LINES_MULTI = [            // 여러 명일 때 (친구들이 놀리는 톤)
+  '야!!!','너 때문이야!','이걸 못 넘네','아 진짜~','한 번만 더 뛰지!','책임져!!',
+  '누가 걸렸어?','설마 너?','에이~','실망이야…','다시 해 다시!','발이 짧았나?'
+];
+const BLAME_LINES_SOLO = [             // 1인용 (자책 톤)
+  '아이고…','한 발만 더!','아까웠다…','다시 가자!','발이 안 떨어졌네'
+];
 // 공정성 하한: 줄 주기는 총 체공시간보다 항상 길어야 착지→재점프가 가능(무조건 걸림 방지)
 const MIN_PERIOD = JUMP_AIR + 0.08;    // = 0.56초
 
@@ -321,6 +332,7 @@ const G = {
   passes:0, spins:0, score:0, combo:0, bestCombo:0,
   players:[], particles:[], shake:0, strikeFlash:0,
   lives:START_LIVES, trips:0,
+  blame:null,                    // {idx, t, lines:[{txt,at,dx,dy,rot}]}
   finalStats:null,
 };
 let BEST = { 1:0, 2:0, 3:0, online:0 };
@@ -359,7 +371,7 @@ function resetRun(){
   G.t=0; G.ropeAngle=0; G.passes=0; G.spins=0;
   G.score=0; G.combo=0; G.bestCombo=0;
   G.particles=[]; G.shake=0; G.strikeFlash=0;
-  G.lives=START_LIVES; G.trips=0;
+  G.lives=START_LIVES; G.trips=0; G.blame=null;
   G.ropeSpeed=(2*Math.PI)/periodFor(0);
 }
 
@@ -449,6 +461,10 @@ function loop(ts){
   if(G.running && !G.paused && !G.over){
     if(G.phase==='countdown'){
       tickCountdown(dt);
+    } else if(G.phase==='blame'){
+      // 연출 중에는 줄·캐릭터를 멈춘다. 방장이 종료 시점을 정하고, 게스트는 화면만 재생.
+      if(!G.online || G.isHost) tickBlame(dt);
+      else { G.t += dt; decayFx(dt); stepParticles(dt); if(G.blame) G.blame.t += dt; }
     } else {
       if(!G.online || G.isHost) update(dt);
       else guestTick(dt);
@@ -488,6 +504,75 @@ function tickCountdown(dt){
 function decayFx(dt){
   if(G.shake>0) G.shake = Math.max(0, G.shake - dt*4);
   if(G.strikeFlash>0) G.strikeFlash = Math.max(0, G.strikeFlash - dt*5);
+}
+
+/* ---------------- 맹비난 연출 (마지막에 걸린 캐릭터 확대) ---------------- */
+function startBlame(idx){
+  if(idx == null || idx < 0 || !G.players[idx]) { endGame(); return; }
+  const multi = G.players.length > 1;
+  const pool = multi ? BLAME_LINES_MULTI : BLAME_LINES_SOLO;
+  // 겹치지 않게 섞어서 3~4개 뽑고, 시간차로 튀어나오게 배치
+  const picked = [];
+  const bag = pool.slice();
+  const n = Math.min(multi?4:2, bag.length);
+  for(let i=0;i<n;i++){
+    const k = Math.floor(Math.random()*bag.length);
+    picked.push(bag.splice(k,1)[0]);
+  }
+  G.blame = {
+    idx, t:0,
+    lines: picked.map((txt,i)=>({
+      txt,
+      at: 0.45 + i*0.42,                        // 등장 시점(초)
+      dx: (i%2===0 ? -1 : 1) * (58 + (i*10)),   // 좌우 번갈아 배치
+      dy: -78 + i*40,
+      rot: ((i%2===0) ? -1 : 1) * (0.06 + i*0.02),
+    })),
+  };
+  G.phase = 'blame';
+  G.shake = 1; G.strikeFlash = 1;
+  SFX.boo();
+  if(G.online && G.isHost) Net.broadcast({t:'blame', i:idx, lines:picked});
+}
+function applyRemoteBlame(idx, lines){    // 게스트: 방장이 보낸 연출을 그대로 재생
+  if(!G.players[idx]) return;
+  G.blame = {
+    idx, t:0,
+    lines:(lines||[]).map((txt,i)=>({
+      txt, at:0.45+i*0.42,
+      dx:(i%2===0?-1:1)*(58+i*10), dy:-78+i*40,
+      rot:((i%2===0)?-1:1)*(0.06+i*0.02),
+    })),
+  };
+  G.phase='blame'; G.shake=1; G.strikeFlash=1; SFX.boo();
+}
+function tickBlame(dt){
+  G.t += dt; decayFx(dt); stepParticles(dt);
+  const b = G.blame; if(!b) { endGame(); return; }
+  const prev = b.t; b.t += dt;
+  // 대사가 튀어나오는 순간마다 효과음
+  for(const L of b.lines){ if(prev < L.at && b.t >= L.at){ SFX.taunt(); G.shake = Math.max(G.shake, 0.5); } }
+  // 화난 이모지 파티클을 계속 뿌림
+  const p = G.players[b.idx];
+  if(p && Math.random() < dt*14){
+    const groundY = H*GROUND_RATIO;
+    G.particles.push({ x:p.x + (Math.random()-0.5)*70, y:groundY-90-Math.random()*40,
+      vx:(Math.random()-0.5)*40, vy:-40-Math.random()*50, r:2+Math.random()*3,
+      col:['#ff5c8a','#ff8f3e','#ffd23e'][Math.floor(Math.random()*3)], life:0.5+Math.random()*0.4 });
+  }
+  if(b.t >= BLAME_TIME){ endGame(); }
+}
+function blameCamera(){          // 확대 카메라 파라미터 (렌더에서 사용)
+  const b = G.blame; if(!b) return null;
+  const p = G.players[b.idx]; if(!p) return null;
+  const groundY = H*GROUND_RATIO;
+  const inT = Math.min(1, b.t/0.55);                       // 줌 인
+  const ease = 1 - Math.pow(1-inT, 3);
+  const outT = Math.max(0, (b.t-(BLAME_TIME-0.4))/0.4);    // 마지막에 살짝 되돌림
+  const k = ease * (1 - outT*0.35);
+  const zoom = 1 + 1.25*k;
+  const fx = p.x, fy = groundY - 52;                        // 초점(캐릭터 몸통)
+  return {zoom, fx, fy, k, p, groundY};
 }
 function stepParticles(dt){
   for(const pt of G.particles){ pt.x+=pt.vx*dt; pt.y+=pt.vy*dt; pt.vy+=420*dt; pt.life-=dt; }
@@ -551,6 +636,7 @@ function resolveStrike(){
   const comboIfGood = G.combo + 1;
   const mult = 1 + Math.floor(comboIfGood/10);
   let lostThisPass = 0;
+  let culpritIdx = -1;                 // 마지막 생명을 날린 캐릭터
   for(const p of G.players){
     if(!p.alive) continue;          // 접속이 끊긴 참가자는 판정 제외
     if(p.stumble > 0) continue;     // 걸린 직후 회복 중 — 점수도, 생명 차감도 없음
@@ -564,6 +650,7 @@ function resolveStrike(){
       // 걸림 → 라운드 공유 생명 1칸 차감. 캐릭터는 죽지 않고 잠깐 회복 후 계속 플레이.
       p.stumble = STUMBLE_TIME; p.buffer = 0; p.trips++;
       G.trips++; lostThisPass++;
+      if(culpritIdx < 0) culpritIdx = G.players.indexOf(p);
       anyFail = true; G.shake=1; G.strikeFlash=1;
       spawnParticles(p.x, groundY-6, false, true);
     }
@@ -573,7 +660,7 @@ function resolveStrike(){
   if(anyPerfect){ SFX.perfect(); showToast('PERFECT!'); }
   if(anyFail){
     SFX.fail(); G.combo = 0;
-    if(G.lives <= 0){ updateHUD(); endGame(); return; }
+    if(G.lives <= 0){ updateHUD(); startBlame(culpritIdx); return; }
     showToast(G.lives === 1 ? '마지막 기회!' : '생명 -'+lostThisPass+'  (남은 '+G.lives+')');
   } else {
     if(anyGood){ G.combo = comboIfGood; G.bestCombo = Math.max(G.bestCombo, G.combo); }
@@ -598,11 +685,16 @@ function spawnParticles(x,y,perfect,fail){
 
 /* ---------------- Render ---------------- */
 function render(){
+  const cam = blameCamera();          // 맹비난 연출 중이면 확대 카메라
   ctx.save();
+  drawBackground();                   // 흔들림/줌으로 생기는 가장자리 공백 방지: 항상 먼저 전체를 칠함
   if(G.shake>0){
-    // 흔들림으로 생기는 가장자리 미갱신 띠 방지: 먼저 화면 전체를 칠하고 나서 이동
-    drawBackground();
     const s=G.shake*8; ctx.translate((Math.random()-0.5)*s,(Math.random()-0.5)*s);
+  }
+  if(cam){                            // 초점을 화면 중앙에 두고 확대
+    ctx.translate(W/2, H*0.52);
+    ctx.scale(cam.zoom, cam.zoom);
+    ctx.translate(-cam.fx, -cam.fy);
   }
   drawBackground();
   const groundY = H*GROUND_RATIO;
@@ -615,7 +707,97 @@ function render(){
     ctx.beginPath(); ctx.arc(pt.x, pt.y, pt.r, 0, 7); ctx.fill();
   }
   ctx.globalAlpha = 1;
+  if(cam) drawBlameOverlay(cam);      // 스포트라이트·손가락질·대사 (확대 좌표계 안에서)
+  ctx.restore();
+  // 화면 고정 오버레이(줌 영향 X)
   if(G.strikeFlash>0){ ctx.fillStyle='rgba(255,60,80,'+(G.strikeFlash*0.28)+')'; ctx.fillRect(0,0,W,H); }
+  if(cam){ drawBlameVignette(cam); drawBlameHud(cam); }
+}
+
+function drawBlameVignette(cam){       // 주변을 어둡게 눌러 시선을 몰아준다
+  const a = 0.52 * cam.k;
+  const g = ctx.createRadialGradient(W/2, H*0.52, Math.min(W,H)*0.16, W/2, H*0.52, Math.max(W,H)*0.62);
+  g.addColorStop(0,'rgba(0,0,0,0)');
+  g.addColorStop(1,'rgba(20,0,10,'+a.toFixed(3)+')');
+  ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+}
+
+function drawBlameOverlay(cam){    // 확대 좌표계 안 — 바닥 스포트라이트만
+  const p = cam.p, groundY = cam.groundY;
+  ctx.save();
+  ctx.globalAlpha = 0.30*cam.k;
+  const sg = ctx.createRadialGradient(p.x, groundY, 4, p.x, groundY, 96);
+  sg.addColorStop(0,'rgba(255,240,120,0.95)'); sg.addColorStop(1,'rgba(255,240,120,0)');
+  ctx.fillStyle=sg; ctx.beginPath(); ctx.ellipse(p.x, groundY, 96, 30, 0, 0, 7); ctx.fill();
+  ctx.restore();
+}
+
+// 손가락질·대사·이름은 '화면 좌표계'에 그린다(확대에 같이 커져서 잘리지 않도록).
+// 걸린 캐릭터는 화면 중앙(W/2, H*0.52)에 초점이 맞춰져 있다.
+function drawBlameHud(cam){
+  const b = G.blame, p = cam.p;
+  const cx = W/2, cy = H*0.52;
+  const fadeIn = Math.min(1, b.t/0.35);
+  const fadeOut = Math.max(0, Math.min(1, (BLAME_TIME - b.t)/0.35));
+
+  // 다른 캐릭터들이 사방에서 손가락질
+  const others = G.players.filter(o=>o!==p && o.alive);
+  ctx.save();
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  others.forEach((o,i)=>{
+    const side = (i%2===0) ? -1 : 1;
+    const row  = Math.floor(i/2);
+    const push = Math.sin(G.t*16 + i)*6;                    // 들이대는 움직임
+    const hx = Math.max(34, Math.min(W-34, cx + side*(146 - push) ));
+    const hy = cy - 6 - row*54;
+    ctx.globalAlpha = fadeIn*fadeOut;
+    ctx.font='32px Trebuchet MS';
+    ctx.fillText(side<0 ? '👉' : '👈', hx, hy);
+    ctx.fillStyle=o.char.body;                              // 누가 가리키는지 색 점으로(손가락 바깥쪽 = 가리키는 사람)
+    ctx.beginPath(); ctx.arc(hx + side*26, hy+2, 7, 0, 7); ctx.fill();
+    ctx.strokeStyle='rgba(43,43,58,.55)'; ctx.lineWidth=2; ctx.stroke();
+    ctx.font='18px Trebuchet MS';
+    ctx.fillText('💢', hx, hy - 30 + Math.sin(G.t*12+i)*3);
+  });
+  ctx.restore();
+
+  // 걸린 캐릭터 이름
+  const nameA = Math.min(1, Math.max(0, (b.t-0.15)/0.3)) * fadeOut;
+  if(nameA > 0){
+    ctx.save();
+    ctx.globalAlpha = nameA; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.font='bold 30px Trebuchet MS';
+    ctx.lineWidth=7; ctx.strokeStyle='rgba(255,255,255,0.95)';
+    ctx.strokeText(p.name, cx, cy + 118);
+    ctx.fillStyle='#d61f45'; ctx.fillText(p.name, cx, cy + 118);
+    ctx.restore();
+  }
+
+  // 대사 말풍선 — 시간차로 톡톡 튀어나옴 (화면 안에 들어오도록 좌우 클램프)
+  ctx.save();
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  b.lines.forEach((L,i)=>{
+    const age = b.t - L.at;
+    if(age < 0) return;
+    const pop = Math.min(1, age/0.16);
+    const s = 1 + 0.30*Math.sin(pop*Math.PI);
+    ctx.font='bold 20px Trebuchet MS';
+    const tw = ctx.measureText(L.txt).width;
+    const halfW = tw/2 + 14;
+    const side = (i%2===0) ? -1 : 1;
+    const row  = Math.floor(i/2);
+    const bx = Math.max(halfW+6, Math.min(W-halfW-6, cx + side*100));
+    const by = cy + (row===0 ? -128 : 172) - Math.min(age,1)*8;
+    ctx.save();
+    ctx.globalAlpha = fadeOut;
+    ctx.translate(bx, by);
+    ctx.rotate(L.rot); ctx.scale(s, s);
+    ctx.fillStyle='rgba(255,255,255,0.97)';
+    roundRect(-halfW, -19, halfW*2, 38, 14); ctx.fill();
+    ctx.lineWidth=3; ctx.strokeStyle='#ff3b5c'; ctx.stroke();
+    ctx.fillStyle='#d61f45'; ctx.font='bold 20px Trebuchet MS'; ctx.fillText(L.txt, 0, 1);
+    ctx.restore();
+  });
   ctx.restore();
 }
 
@@ -692,7 +874,10 @@ function drawCharacter(p, groundY){
   const shs = 1-prog*0.4;
   ctx.fillStyle='rgba(0,0,0,'+(0.18*(1-prog*0.5))+')';
   ctx.beginPath(); ctx.ellipse(0,6,26*shs,8*shs,0,0,7); ctx.fill(); ctx.restore();
-  if(stunned){
+  const blamed = G.blame && G.players[G.blame.idx] === p;
+  if(blamed){
+    ctx.rotate(Math.sin(G.t*16)*0.10);            // 몰아세워지며 부들부들 (선명하게 보이도록 깜빡임 없음)
+  } else if(stunned){
     // 회복 중에는 깜빡여서 '무적 상태'임을 알림
     ctx.globalAlpha = (Math.floor(G.t*12)%2===0) ? 0.35 : 0.8;
     ctx.rotate(Math.sin(G.t*18)*0.12);            // 살짝 휘청
@@ -853,6 +1038,7 @@ function startOnline(){ resize(); show(null); hud(true); last=0; updateHUD(); st
 
 function endGame(){
   G.over=true; G.running=false;
+  G.blame=null; G.phase='play';        // 연출 정리(결과 화면은 확대 없이 깔끔하게)
   const stats = { score:G.score, bestCombo:G.bestCombo, spins:G.spins, passes:G.passes,
                   trips:G.trips, perChar:G.players.map(p=>({name:p.name, trips:p.trips})) };
   G.finalStats = stats;
@@ -1010,6 +1196,7 @@ const Net = {
     else if(d.t==='start'){ this._beginAsGuest(d.roster); }
     else if(d.t==='state'){ this._applyState(d); }
     else if(d.t==='fx'){ this._playFx(d); }
+    else if(d.t==='blame'){ applyRemoteBlame(d.i, d.lines); }
     else if(d.t==='over'){ if(!G.over){ G.over=true; G.running=false; this.started=false; showOverScreen(d.stats); } }
   },
   _hostGone(){
