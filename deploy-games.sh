@@ -23,6 +23,24 @@ SSHD_PORT="${SSHD_PORT:-}"
 case "$PORT" in ''|*[!0-9]*) echo "PORT는 숫자여야 합니다: $PORT"; exit 1;; esac
 [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] || { echo "PORT 범위 오류: $PORT"; exit 1; }
 
+# 브라우저(Chrome/Firefox)가 접속을 거부하는 포트 — 서버를 어떻게 설정해도 웹으로 못 씁니다.
+# 실측: http://IP:22/ → net::ERR_UNSAFE_PORT (요청 자체가 전송되지 않음)
+BLOCKED_PORTS="1 7 9 11 13 15 17 19 20 21 22 23 25 37 42 43 53 69 77 79 87 95 101 102 103 104 109 110 111 113 115 117 119 123 135 137 138 139 143 161 179 389 427 465 512 513 514 515 526 530 531 532 540 548 554 556 563 587 601 636 989 990 993 995 1719 1720 1723 2049 3659 4045 5060 5061 6000 6566 6665 6666 6667 6668 6669 6679 6697 10080"
+for bp in $BLOCKED_PORTS; do
+  if [ "$PORT" = "$bp" ]; then
+    cat <<EOM
+✘ ${PORT}번은 브라우저가 차단하는 포트입니다(Chrome: ERR_UNSAFE_PORT, Firefox: 제한된 주소).
+  서버에서 nginx를 ${PORT}번에 띄워도 브라우저가 요청을 보내지 않으므로 게임에 접속할 수 없습니다.
+  (curl로는 200이 오지만 브라우저만 거부합니다 — 서버 설정으로 우회 불가)
+
+  권장:  ACG에 TCP 80 을 열고    sudo bash deploy-games.sh
+  대안:  ACG에 TCP 8080 을 열고  sudo PORT=8080 bash deploy-games.sh
+  포트를 전혀 못 여는 경우 → 아웃바운드 터널(Cloudflare Tunnel) 방식을 사용하세요.
+EOM
+    exit 1
+  fi
+done
+
 say(){ printf '\n\033[1;36m▶ %s\033[0m\n' "$*"; }
 ok(){  printf '  \033[1;32m✔\033[0m %s\n' "$*"; }
 warn(){ printf '  \033[1;33m!\033[0m %s\n' "$*"; }
@@ -184,7 +202,7 @@ server {
     index        index.html;
 
     gzip on;
-    gzip_types text/html text/css application/javascript application/json image/svg+xml;
+    gzip_types text/css application/javascript application/json image/svg+xml;
     gzip_min_length 1024;
 
     # HTML은 항상 최신을 받도록(게임 업데이트가 바로 반영됨)
