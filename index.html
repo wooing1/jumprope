@@ -20,6 +20,8 @@
   .screen{position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:flex-start;
           gap:14px; padding:24px; text-align:center; z-index:5; overflow-y:auto;}
   .screen.hidden{display:none;}
+  /* #hud도 hidden 클래스로 숨겨져야 한다(기존에는 규칙이 없어 타이틀·결과 화면에도 점수/일시정지가 보였음) */
+  #hud.hidden{display:none;}
   /* margin:auto로 세로 중앙 정렬 — 내용이 화면보다 길 때 위쪽이 잘려 스크롤 못 하는 문제 방지 */
   .screen > *:first-child{margin-top:auto;}
   .screen > *:last-child{margin-bottom:auto;}
@@ -61,6 +63,11 @@
             paint-order:stroke fill; text-shadow:0 3px 0 rgba(0,0,0,.35), 0 2px 8px rgba(0,0,0,.35);}
   .hudsmall{font-size:13px; font-weight:700; color:#fff; -webkit-text-stroke:1.5px rgba(10,40,60,.7);
             paint-order:stroke fill; text-shadow:0 1px 3px rgba(0,0,0,.5); text-align:right;}
+  /* 라운드 생명(하트) */
+  .hudlives{font-size:20px; letter-spacing:2px; line-height:1; text-align:right;
+            filter:drop-shadow(0 2px 3px rgba(0,0,0,.35));}
+  .hudlives.danger{animation:heartPulse .7s ease-in-out infinite;}
+  @keyframes heartPulse{0%,100%{transform:scale(1)}50%{transform:scale(1.18)}}
   #pauseBtn{pointer-events:auto; cursor:pointer; background:rgba(255,255,255,.92); border:none; width:44px; height:44px;
             border-radius:14px; font-size:18px; box-shadow:0 4px 0 rgba(0,0,0,.12);}
   #players{position:absolute; left:0; right:0; bottom:0; display:flex; z-index:4;
@@ -94,7 +101,7 @@
     <div><div id="score" class="hudscore">0</div><div id="combo" class="hudsmall"></div></div>
     <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px">
       <button id="pauseBtn" type="button" aria-label="일시정지" title="일시정지">⏸</button>
-      <div id="alive" class="hudsmall"></div>
+      <div id="lives" class="hudlives"></div>
     </div>
   </div>
   <div id="netbadge"></div>
@@ -198,7 +205,7 @@
     <div class="glass">
       <div class="label">결과</div>
       <div id="finalScore" class="big">0</div>
-      <div id="resultMsg" class="sub"></div>
+      <div id="resultMsg" class="sub" style="white-space:pre-line"></div>
       <div id="bestMsg" class="best"></div>
       <div style="height:14px"></div>
       <button class="btn" id="retryBtn">다시 하기</button>
@@ -280,6 +287,10 @@ const CLEAR = 0.14;                    // 착지 판정 여백 — 낮춰서 "�
 const PERFECT_WIN = 0.11;
 const JUMP_BUFFER = 0.13;              // 입력 버퍼(초) — 착지 직전에 누른 탭을 착지 순간 자동 반영(클릭 씹힘 방지)
 const MAX_ONLINE = 4;
+// 라운드 생명: 누가 걸렸는지와 무관하게 '한 라운드에 총 3번' 걸리면 종료.
+// (같은 캐릭터가 3번이든, 서로 다른 캐릭터가 각각 걸리든 모두 합산)
+const START_LIVES = 3;
+const STUMBLE_TIME = 1.1;              // 걸린 뒤 회복 시간(초) — 이 동안은 판정 제외(연속 차감 방지)
 // 공정성 하한: 줄 주기는 총 체공시간보다 항상 길어야 착지→재점프가 가능(무조건 걸림 방지)
 const MIN_PERIOD = JUMP_AIR + 0.08;    // = 0.56초
 
@@ -309,6 +320,7 @@ const G = {
   t:0, ropeAngle:0, ropeSpeed:(2*Math.PI)/1.15,
   passes:0, spins:0, score:0, combo:0, bestCombo:0,
   players:[], particles:[], shake:0, strikeFlash:0,
+  lives:START_LIVES, trips:0,
   finalStats:null,
 };
 let BEST = { 1:0, 2:0, 3:0, online:0 };
@@ -323,6 +335,7 @@ function makePlayers(entries){
     name: e.name || CHARS[e.charIdx % CHARS.length].name,
     x: slotW*(i+1),
     jumpT: 999, jumping:false, alive:true, scored:false, squish:0, hop:0, buffer:0,
+    stumble:0, trips:0,        // stumble: 회복 중 남은 시간, trips: 이 캐릭터가 걸린 횟수(기록용)
   }));
 }
 
@@ -346,12 +359,17 @@ function resetRun(){
   G.t=0; G.ropeAngle=0; G.passes=0; G.spins=0;
   G.score=0; G.combo=0; G.bestCombo=0;
   G.particles=[]; G.shake=0; G.strikeFlash=0;
+  G.lives=START_LIVES; G.trips=0;
   G.ropeSpeed=(2*Math.PI)/periodFor(0);
 }
 
 /* ---------------- Input ---------------- */
 function doJumpOrBuffer(p){       // 지금 뛸 수 있으면 뛰고, 공중이면 입력을 버퍼에 저장
   if(!p || !p.alive) return;
+  if(p.stumble > 0){              // 회복 중 — 입력을 버려지 않고 회복되는 순간 점프
+    p.buffer = p.stumble + JUMP_BUFFER;
+    return;
+  }
   if(p.jumpT > JUMP_AIR){         // 착지 상태 → 즉시 점프
     p.jumpT = 0; p.jumping = true; p.squish = 1; p.buffer = 0; SFX.jump();
     return;
@@ -480,10 +498,14 @@ function stepPlayers(dt){
     if(p.jumpT <= JUMP_AIR) p.jumpT += dt;
     if(p.squish>0) p.squish = Math.max(0, p.squish - dt*4);
     if(p.hop>0) p.hop = Math.max(0, p.hop - dt*3);
+    if(p.stumble>0){                       // 걸린 뒤 회복
+      p.stumble = Math.max(0, p.stumble - dt);
+      if(p.stumble === 0) p.jumpT = 999;   // 회복 완료 → 착지 상태로 복귀
+    }
     // 입력 버퍼: 착지 순간 자동으로 점프 실행(클릭 씹힘 방지)
     if(p.buffer > 0){
       p.buffer -= dt;
-      if(p.alive && p.jumpT > JUMP_AIR){
+      if(p.alive && p.stumble<=0 && p.jumpT > JUMP_AIR){
         p.jumpT = 0; p.jumping = true; p.squish = 1; p.buffer = 0; SFX.jump();
       } else if(p.buffer <= 0){ p.buffer = 0; }
     }
@@ -528,8 +550,10 @@ function resolveStrike(){
   // 콤보는 '줄 통과 1회'당 1만 올린다(인원수만큼 뻥튀기던 문제 수정)
   const comboIfGood = G.combo + 1;
   const mult = 1 + Math.floor(comboIfGood/10);
+  let lostThisPass = 0;
   for(const p of G.players){
-    if(!p.alive) continue;
+    if(!p.alive) continue;          // 접속이 끊긴 참가자는 판정 제외
+    if(p.stumble > 0) continue;     // 걸린 직후 회복 중 — 점수도, 생명 차감도 없음
     if(jumpProgress(p) >= CLEAR){
       anyGood = true;
       const perfect = Math.abs(p.jumpT - JUMP_RISE) <= PERFECT_WIN;   // 정점(상승 완료) 근처면 PERFECT
@@ -537,15 +561,20 @@ function resolveStrike(){
       p.hop = 1; spawnParticles(p.x, groundY-6, perfect);
       if(perfect) anyPerfect = true;
     } else {
-      p.alive = false; p.buffer = 0; anyFail = true; G.shake=1; G.strikeFlash=1;
+      // 걸림 → 라운드 공유 생명 1칸 차감. 캐릭터는 죽지 않고 잠깐 회복 후 계속 플레이.
+      p.stumble = STUMBLE_TIME; p.buffer = 0; p.trips++;
+      G.trips++; lostThisPass++;
+      anyFail = true; G.shake=1; G.strikeFlash=1;
       spawnParticles(p.x, groundY-6, false, true);
     }
   }
+  if(lostThisPass > 0) G.lives = Math.max(0, G.lives - lostThisPass);
   G.passes++;
   if(anyPerfect){ SFX.perfect(); showToast('PERFECT!'); }
   if(anyFail){
     SFX.fail(); G.combo = 0;
-    if(G.players.filter(p=>p.alive).length === 0){ endGame(); }
+    if(G.lives <= 0){ updateHUD(); endGame(); return; }
+    showToast(G.lives === 1 ? '마지막 기회!' : '생명 -'+lostThisPass+'  (남은 '+G.lives+')');
   } else {
     if(anyGood){ G.combo = comboIfGood; G.bestCombo = Math.max(G.bestCombo, G.combo); }
     if(anyGood && !anyPerfect) SFX.good(G.combo);
@@ -651,7 +680,9 @@ function drawRope(groundY){
 function drawCharacter(p, groundY){
   const prog = jumpProgress(p);
   const y = groundY - prog*JUMP_HEIGHT;
-  const alive = p.alive; const c = p.char;
+  const stunned = p.stumble > 0;                  // 걸려서 회복 중
+  const alive = p.alive && !stunned;               // 표정·자세용 정상 상태
+  const c = p.char;
   const squish = alive?(p.squish*0.18):0;
   const scaleX = 1+squish, scaleY = 1-squish;
   const isMe = (G.online && p===G.players[G.myPid]);
@@ -661,7 +692,11 @@ function drawCharacter(p, groundY){
   const shs = 1-prog*0.4;
   ctx.fillStyle='rgba(0,0,0,'+(0.18*(1-prog*0.5))+')';
   ctx.beginPath(); ctx.ellipse(0,6,26*shs,8*shs,0,0,7); ctx.fill(); ctx.restore();
-  if(!alive) ctx.globalAlpha=0.55;
+  if(stunned){
+    // 회복 중에는 깜빡여서 '무적 상태'임을 알림
+    ctx.globalAlpha = (Math.floor(G.t*12)%2===0) ? 0.35 : 0.8;
+    ctx.rotate(Math.sin(G.t*18)*0.12);            // 살짝 휘청
+  } else if(!p.alive){ ctx.globalAlpha=0.45; }
   ctx.scale(scaleX, scaleY);
   const bodyR=30, cy=-bodyR;
   // legs
@@ -710,7 +745,7 @@ function drawCharacter(p, groundY){
   ctx.stroke();
   // name tag
   if(G.online || G.mode>1){
-    ctx.globalAlpha = alive?1:0.5;
+    ctx.globalAlpha = p.alive ? (stunned?0.9:1) : 0.5;
     ctx.fillStyle = isMe? '#ff3b7a' : '#2b2b3a';
     ctx.font = (isMe?'bold 13px':'bold 12px')+' Trebuchet MS'; ctx.textAlign='center';
     ctx.fillText((isMe?'★ ':'')+p.name, 0, cy-bodyR-8);
@@ -729,9 +764,11 @@ function hud(on){ el('hud').classList.toggle('hidden', !on); el('netbadge').styl
 function updateHUD(){
   el('score').textContent = G.score;
   el('combo').textContent = G.combo>=2 ? ('🔥 '+G.combo+' 콤보') : '';
-  if(G.online || G.mode>1){
-    el('alive').textContent = '생존 '+G.players.filter(p=>p.alive).length+'/'+G.players.length;
-  } else el('alive').textContent='';
+  // 라운드 공유 생명 — 하트로 표시(빈 칸은 잃은 생명)
+  let hearts = '';
+  for(let i=0;i<START_LIVES;i++) hearts += (i < G.lives) ? '❤️' : '🖤';
+  el('lives').textContent = hearts;
+  el('lives').classList.toggle('danger', G.lives === 1);
   if(G.online) el('netbadge').textContent = (G.isHost?'방장':'참가') + ' · ' + G.players.length + '명';
 }
 let toastTimer=null;
@@ -740,11 +777,11 @@ function showToast(txt){ const t=el('toast'); t.textContent=txt; t.style.opacity
 /* ---------------- Flow (offline) ---------------- */
 const READY = {
   1:{ title:'1인용 🐶', desc:'화면 아무 곳이나 탭하거나 Space를 눌러 점프!',
-      tip:'줄이 발밑을 지날 때 공중에 떠 있어야 해요. 반환점에서 딱 맞추면 <b>PERFECT</b>! 시간이 갈수록 리듬이 흔들리니 눈으로 줄을 보고 반응하세요.' },
+      tip:'줄이 발밑을 지날 때 공중에 떠 있어야 해요. 반환점에서 딱 맞추면 <b>PERFECT</b>!<br>생명 <b>❤️❤️❤️</b> — <b>3번</b> 걸리면 라운드가 끝나요.' },
   2:{ title:'2인 단체 🐶🐰', desc:'둘이 같은 줄을 함께 넘어요!',
-      tip:'멍이 = <b>F</b> / 왼쪽 절반 탭 · 토리 = <b>J</b> / 오른쪽 절반 탭.<br>한 명이라도 걸리면 아웃, 마지막까지 살아남기!' },
+      tip:'멍이 = <b>F</b> / 왼쪽 절반 탭 · 토리 = <b>J</b> / 오른쪽 절반 탭.<br>생명 <b>❤️❤️❤️</b>을 <b>함께</b> 씁니다 — 누가 걸리든 합쳐서 3번이면 끝!' },
   3:{ title:'3인 단체 🐶🐰🐱', desc:'셋이서 같은 줄을 함께 넘어요!',
-      tip:'멍이 <b>F</b> · 토리 <b>J</b> · 냥이 <b>H</b> (또는 각자 화면 구역 / 아래 버튼).<br>다 같이 리듬을 맞춰야 오래 버텨요!' },
+      tip:'멍이 <b>F</b> · 토리 <b>J</b> · 냥이 <b>H</b> (또는 각자 화면 구역 / 아래 버튼).<br>생명 <b>❤️❤️❤️</b>을 <b>함께</b> 씁니다 — 걸린 사람은 잠깐 휘청였다 다시 뛰어요!' },
 };
 document.querySelectorAll('[data-mode]').forEach(b=>{
   b.addEventListener('click', ()=>{
@@ -816,7 +853,8 @@ function startOnline(){ resize(); show(null); hud(true); last=0; updateHUD(); st
 
 function endGame(){
   G.over=true; G.running=false;
-  const stats = { score:G.score, bestCombo:G.bestCombo, spins:G.spins };
+  const stats = { score:G.score, bestCombo:G.bestCombo, spins:G.spins, passes:G.passes,
+                  trips:G.trips, perChar:G.players.map(p=>({name:p.name, trips:p.trips})) };
   G.finalStats = stats;
   if(G.online && G.isHost){
     Net.broadcast({t:'over', stats});
@@ -833,6 +871,11 @@ function showOverScreen(stats){
   let msg = '최고 콤보 '+stats.bestCombo+' · '+stats.spins+'번 회전 버팀';
   if(G.online) msg = '온라인 '+G.players.length+'인 · '+msg;
   else if(G.mode>1) msg = '단체 '+msg;
+  // 누가 몇 번 걸렸는지 (여러 명일 때만)
+  if(stats.perChar && stats.perChar.length > 1){
+    const who = stats.perChar.filter(c=>c.trips>0).map(c=>c.name+' '+c.trips+'번').join(' · ');
+    if(who) msg += '\n걸린 횟수 — ' + who;
+  }
   el('resultMsg').textContent = msg;
   el('menuBtn').textContent = G.online ? '← 로비/메뉴' : '← 모드 선택';
   show('overScreen');
@@ -939,9 +982,10 @@ const Net = {
     const idx = this._playIndex(pid);
     const p = G.players[idx];
     if(p && p.alive){
-      p.alive = false; p.buffer = 0;
+      p.alive = false; p.buffer = 0; p.stumble = 0;
       showToast((p.name||'참가자')+' 연결 끊김');
-      if(!G.players.some(q=>q.alive)) endGame();   // 마지막 생존자가 나가도 게임이 끝나도록
+      // 참가자가 모두 떠나면 종료(생명이 남아 있어도 진행할 사람이 없음)
+      if(!G.players.some(q=>q.alive)) endGame();
       else updateHUD();
     }
   },
@@ -1037,15 +1081,18 @@ const Net = {
     this.lastSend = ts;
     this.broadcast({
       t:'state', a:G.ropeAngle, sp:G.ropeSpeed, sc:G.score, cb:G.combo, sn:G.spins, ov:G.over,
-      ps: G.players.map(p=>({j:+p.jumpT.toFixed(3), a:p.alive?1:0, h:+p.hop.toFixed(2), s:+p.squish.toFixed(2)}))
+      lv:G.lives,
+      ps: G.players.map(p=>({j:+p.jumpT.toFixed(3), a:p.alive?1:0, h:+p.hop.toFixed(2), s:+p.squish.toFixed(2), st:+p.stumble.toFixed(2)}))
     });
   },
   _applyState(d){
     G.ropeAngle = d.a; G.ropeSpeed = d.sp;
     G.score = d.sc; G.combo = d.cb; G.spins = d.sn;
+    if(d.lv != null) G.lives = d.lv;                 // 라운드 생명은 방장이 권위적으로 관리
     for(let i=0;i<G.players.length && i<d.ps.length;i++){
       const p=G.players[i], s=d.ps[i];
       p.alive = !!s.a; p.hop = s.h; p.squish = s.s;
+      if(s.st != null) p.stumble = s.st;
       if(i===G.myPid){ p.jumpT = Math.min(p.jumpT, s.j); }   // keep optimistic if fresher
       else p.jumpT = s.j;
     }
