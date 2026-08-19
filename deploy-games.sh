@@ -3,7 +3,13 @@
 #  게임 서버 배포 스크립트 (NAVER Cloud / Rocky Linux 8.x)
 #  서버에서 root로 한 번 실행하면 nginx + 게임 포털이 세팅됩니다.
 #
-#  사용법:  sudo bash deploy-games.sh
+#  사용법:
+#    sudo bash deploy-games.sh                 # 80번으로 서비스(기본, 권장)
+#    sudo PORT=8080 bash deploy-games.sh       # 원하는 포트로 서비스
+#    sudo PORT=22 SSHD_PORT=2222 bash deploy-games.sh
+#          └ ACG를 못 건드릴 때: 이미 열린 22번을 웹에 쓰고 sshd는 2222로 옮김
+#            (주의: 옮긴 뒤엔 22번으로 SSH 접속 불가 → NCP 콘솔 접속으로 관리)
+#
 #  나중에 갱신:  sudo update-games
 # ============================================================
 set -euo pipefail
@@ -11,12 +17,58 @@ set -euo pipefail
 WEBROOT="/var/www/games"
 CONF="/etc/nginx/conf.d/games.conf"
 JUMPROPE_URL="https://raw.githubusercontent.com/wooing1/jumprope/main/index.html"
+PORT="${PORT:-80}"
+SSHD_PORT="${SSHD_PORT:-}"
+
+case "$PORT" in ''|*[!0-9]*) echo "PORT는 숫자여야 합니다: $PORT"; exit 1;; esac
+[ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] || { echo "PORT 범위 오류: $PORT"; exit 1; }
 
 say(){ printf '\n\033[1;36m▶ %s\033[0m\n' "$*"; }
 ok(){  printf '  \033[1;32m✔\033[0m %s\n' "$*"; }
 warn(){ printf '  \033[1;33m!\033[0m %s\n' "$*"; }
 
 [ "$(id -u)" -eq 0 ] || { echo "root로 실행해주세요:  sudo bash $0"; exit 1; }
+
+# ------------------------------------------------------------
+# 0/7  22번을 웹에 쓰려면 sshd를 먼저 옮긴다
+if [ "$PORT" = "22" ]; then
+  if [ -z "$SSHD_PORT" ]; then
+    cat <<'EOM'
+PORT=22 로 서비스하려면 sshd를 다른 포트로 옮겨야 합니다(22번을 동시에 쓸 수 없음).
+  예:  sudo PORT=22 SSHD_PORT=2222 bash deploy-games.sh
+
+⚠ 옮긴 뒤에는 22번으로 SSH 접속이 안 됩니다.
+   ACG에서 새 SSH 포트(2222)를 열지 않으면 외부 SSH가 막히므로,
+   그 경우 NAVER Cloud 콘솔의 '서버 콘솔 접속'으로 관리해야 합니다.
+   그래서 보통은 ACG에 80번을 여는 편이 더 안전하고 간단합니다.
+EOM
+    exit 1
+  fi
+  say "0/7  sshd 포트 이동 (22 → $SSHD_PORT)"
+  cp -n /etc/ssh/sshd_config /etc/ssh/sshd_config.bak.games 2>/dev/null || true
+  if grep -qE '^[[:space:]]*Port[[:space:]]+' /etc/ssh/sshd_config; then
+    sed -i -E "s/^[[:space:]]*Port[[:space:]]+.*/Port $SSHD_PORT/" /etc/ssh/sshd_config
+  else
+    printf '\nPort %s\n' "$SSHD_PORT" >> /etc/ssh/sshd_config
+  fi
+  if command -v semanage >/dev/null 2>&1 || dnf install -y policycoreutils-python-utils >/dev/null 2>&1; then
+    semanage port -a -t ssh_port_t -p tcp "$SSHD_PORT" 2>/dev/null \
+      || semanage port -m -t ssh_port_t -p tcp "$SSHD_PORT" 2>/dev/null || true
+  fi
+  if systemctl is-active --quiet firewalld; then
+    firewall-cmd --permanent --add-port="${SSHD_PORT}/tcp" >/dev/null 2>&1 || true
+    firewall-cmd --reload >/dev/null 2>&1 || true
+  fi
+  if sshd -t 2>/dev/null; then
+    systemctl restart sshd
+    ok "sshd가 ${SSHD_PORT}번에서 동작 중 (기존 세션은 유지됩니다)"
+    warn "새 SSH 접속은 -p ${SSHD_PORT} 를 붙여야 하고, ACG에도 ${SSHD_PORT} 허용이 필요합니다"
+  else
+    warn "sshd 설정 검증 실패 — 원복합니다"
+    cp -f /etc/ssh/sshd_config.bak.games /etc/ssh/sshd_config
+    exit 1
+  fi
+fi
 
 # ------------------------------------------------------------
 say "1/7  nginx 설치"
@@ -125,8 +177,8 @@ say "5/7  nginx 설정"
 cat > "$CONF" <<CONF_EOF
 # 게임 서버 (자동 생성 — deploy-games.sh)
 server {
-    listen       80;
-    listen       [::]:80;
+    listen       $PORT;
+    listen       [::]:$PORT;
     server_name  _;
     root         $WEBROOT;
     index        index.html;
@@ -160,6 +212,12 @@ if command -v getenforce >/dev/null 2>&1 && [ "$(getenforce)" != "Disabled" ]; t
   command -v semanage >/dev/null 2>&1 || dnf install -y policycoreutils-python-utils >/dev/null 2>&1 || true
   semanage fcontext -a -t httpd_sys_content_t "${WEBROOT}(/.*)?" 2>/dev/null || true
   restorecon -R "$WEBROOT" >/dev/null 2>&1 || true
+  # 비표준 포트는 nginx가 bind하기 전에 미리 허용해야 기동에 실패하지 않는다
+  if [ "$PORT" != "80" ]; then
+    semanage port -a -t http_port_t -p tcp "$PORT" 2>/dev/null \
+      || semanage port -m -t http_port_t -p tcp "$PORT" 2>/dev/null || true
+    ok "SELinux: ${PORT}/tcp를 http_port_t로 등록"
+  fi
   ok "SELinux 컨텍스트 적용 ($(getenforce))"
 fi
 
@@ -169,19 +227,20 @@ systemctl restart nginx
 ok "nginx 실행 중"
 
 # ------------------------------------------------------------
-say "6/7  방화벽 개방 (80 / 443)"
+say "6/7  방화벽 개방 (${PORT}번)"
 if systemctl is-active --quiet firewalld; then
-  firewall-cmd --permanent --add-service=http  >/dev/null 2>&1 || true
-  firewall-cmd --permanent --add-service=https >/dev/null 2>&1 || true
+  firewall-cmd --permanent --add-port="${PORT}/tcp" >/dev/null 2>&1 || true
+  [ "$PORT" = "80" ] && firewall-cmd --permanent --add-service=https >/dev/null 2>&1 || true
   firewall-cmd --reload >/dev/null 2>&1 || true
-  ok "firewalld: http/https 허용"
+  ok "firewalld: ${PORT}/tcp 허용"
 else
   warn "firewalld 미실행 — OS 방화벽은 건너뜁니다"
 fi
 
 # ------------------------------------------------------------
 say "7/7  자체 점검"
-CODE=$(curl -s -o /tmp/_gtest -w '%{http_code}' http://127.0.0.1/jumprope/ || echo 000)
+BASE="http://127.0.0.1:${PORT}"
+CODE=$(curl -s -o /tmp/_gtest -w '%{http_code}' "$BASE/jumprope/" || echo 000)
 if [ "$CODE" = "200" ] && grep -q "탭탭 줄넘기" /tmp/_gtest; then
   ok "게임 응답 정상 (HTTP $CODE)"
 else
@@ -190,9 +249,14 @@ else
   cp -n /etc/nginx/nginx.conf /etc/nginx/nginx.conf.bak.games 2>/dev/null || true
   sed -i "s|root         /usr/share/nginx/html;|root         $WEBROOT;|" /etc/nginx/nginx.conf || true
   nginx -t >/dev/null 2>&1 && systemctl reload nginx
-  CODE=$(curl -s -o /tmp/_gtest -w '%{http_code}' http://127.0.0.1/jumprope/ || echo 000)
+  CODE=$(curl -s -o /tmp/_gtest -w '%{http_code}' "$BASE/jumprope/" || echo 000)
   if [ "$CODE" = "200" ] && grep -q "탭탭 줄넘기" /tmp/_gtest; then ok "보정 후 정상 (HTTP $CODE)"
-  else warn "여전히 비정상(HTTP $CODE) — 'nginx -T | head -60' 결과를 확인해주세요"; fi
+  else
+    warn "여전히 비정상(HTTP $CODE)"
+    echo "     확인:  systemctl status nginx --no-pager | tail -20"
+    echo "            ss -tlnp | grep ':${PORT}'"
+    echo "            nginx -T 2>&1 | head -40"
+  fi
 fi
 rm -f /tmp/_gtest
 
@@ -224,19 +288,31 @@ chmod +x /usr/local/bin/update-games
 ok "업데이트 명령 설치:  sudo update-games"
 
 IP=$(curl -s --max-time 5 ifconfig.me 2>/dev/null || echo "서버IP")
+SUF=""; [ "$PORT" = "80" ] || SUF=":$PORT"
 cat <<DONE
 
 ============================================================
  배포 완료 🎉
 
-   포털        http://$IP/
-   줄넘기      http://$IP/jumprope/
-   비행기      http://$IP/plane/   (준비 중)
+   포털        http://${IP}${SUF}/
+   줄넘기      http://${IP}${SUF}/jumprope/
+   비행기      http://${IP}${SUF}/plane/   (준비 중)
 
- ⚠ 외부에서 접속이 안 되면 NAVER Cloud 콘솔에서
-   ACG(방화벽) 인바운드 TCP 80 을 허용해야 합니다.
-   (현재 22번만 열려 있는 상태였습니다)
+ ⚠ 외부에서 접속이 안 되면 NAVER Cloud 콘솔의
+   ACG(방화벽) 인바운드에 TCP ${PORT} 이 허용돼 있는지 확인하세요.
+DONE
+if [ "$PORT" = "22" ]; then
+cat <<DONE2
+   → 22번은 원래 열려 있으니 ACG 수정 없이 바로 접속될 겁니다.
+   → 단, SSH는 이제 ${SSHD_PORT}번입니다:
+        ssh -i <키> -p ${SSHD_PORT} root@${IP}
+      ACG에 ${SSHD_PORT}번을 열지 않으면 외부 SSH가 안 되니,
+      필요하면 NCP 콘솔의 '서버 콘솔 접속'을 사용하세요.
+   → 되돌리려면:  sudo cp /etc/ssh/sshd_config.bak.games /etc/ssh/sshd_config && sudo systemctl restart sshd
+DONE2
+fi
+cat <<DONE3
 
  게임 최신본 갱신:   sudo update-games
 ============================================================
-DONE
+DONE3
