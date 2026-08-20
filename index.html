@@ -384,17 +384,20 @@ function resetRun(){
 /* ---------------- Input ---------------- */
 function doJumpOrBuffer(p){       // 지금 뛸 수 있으면 뛰고, 공중이면 입력을 버퍼에 저장
   if(!p || !p.alive) return;
-  if(p.stumble > 0){              // 회복 중 — 입력을 버려지 않고 회복되는 순간 점프
-    p.buffer = p.stumble + JUMP_BUFFER;
+  if(p.stumble > 0){              // 회복 중 — 회복되는 순간 점프되도록 예약
+    p.buffer = Math.max(p.buffer, p.stumble + JUMP_BUFFER);
     return;
   }
   if(p.jumpT > JUMP_AIR){         // 착지 상태 → 즉시 점프
     p.jumpT = 0; p.jumping = true; p.squish = 1; p.buffer = 0; SFX.jump();
     return;
   }
-  // 공중 입력은 버려지지 않고 착지 순간 반영(연타 씹힘 방지).
-  // 상승/하강 구분 없이 항상 착지까지 살려둠 → 로컬/방장의 jumpT가 지연으로 달라도 판정이 일치(온라인 불일치 방지).
-  p.buffer = (JUMP_AIR - p.jumpT) + JUMP_BUFFER;
+  // 공중: '정점을 지나 내려오는 중'일 때만 다음 점프를 예약(착지 순간 실행).
+  // 이륙 직후 올라가는 중(jumpT<JUMP_RISE)에 누른 입력은 대개 조급한 중복이라,
+  // 그대로 예약하면 0.4초쯤 뒤 원치 않는 자동 점프로 튀어나와 '느리게 입력되는' 느낌을 준다 → 무시.
+  if(p.jumpT >= JUMP_RISE){
+    p.buffer = (JUMP_AIR - p.jumpT) + JUMP_BUFFER;
+  }
 }
 function addInput(pid){          // authoritative jump (host/offline)
   if(!G.running || G.paused || G.over || G.phase!=='play') return;
